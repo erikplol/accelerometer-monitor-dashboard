@@ -1,0 +1,77 @@
+/* Clean minimalist styling - inspired by modern design systems */
+
+body {
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+}
+
+/* Responsive layout for smaller screens */
+@media (max-width: 1024px) {
+    .responsive-column {
+        width: 100% !important;
+        display: block !important;
+    }
+    
+    .js-plotly-plot {
+        height: 25vh !important;
+    }
+}
+
+@media (max-width: 768px) {
+    h1 {
+        font-size: 1.2rem !important;
+    }
+    
+    .header-stats {
+        display: block !important;
+        text-align: center !important;
+        float: none !important;
+        margin-top: 10px !important;
+    }
+    
+    .header-stats span {
+        display: block !important;
+        margin: 5px 0 !important;
+    }
+    
+    .js-plotly-plot {
+        height: 20vh !important;
+    }
+}
+
+/* Smooth rendering */
+.js-plotly-plot {
+    transition: all 0.2s ease;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+::-webkit-scrollbar-track {
+    background: #17181a;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #5f6368;
+    border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #9aa0a6;
+}
+
+/* Text rendering */
+* {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+/* Loading state */
+._dash-loading {
+    opacity: 0.6;
+}
+
