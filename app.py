@@ -17,6 +17,31 @@ from data_collect import (
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 app = dash.Dash(__name__, suppress_callback_exceptions=True)
+app.index_string = '''
+<!DOCTYPE html>
+<html>
+<head>{%metas%}<title>{%title%}</title>{%favicon%}{%css%}
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #17181a; height: 100%; overflow: hidden; }
+
+  /* ── Responsive breakpoints ────────────────────────── */
+  @media (max-width: 1024px) {
+    .top-strip { flex-wrap: wrap !important; }
+    .top-strip > div { flex: 1 1 260px !important; min-width: 220px; }
+  }
+  @media (max-width: 768px) {
+    .graphs-row { flex-wrap: wrap !important; overflow-y: auto !important; }
+    .graphs-row > div { flex: 1 1 100% !important; min-height: 280px; }
+    .top-strip > div { flex: 1 1 100% !important; }
+    html, body { overflow: auto; height: auto; }
+    #root > div { height: auto !important; overflow: auto !important; }
+  }
+</style>
+</head>
+<body>{%app_entry%}{%config%}{%scripts%}{%renderer%}</body>
+</html>
+'''
 app.title = "Engine Vibration Monitor"
 
 SAMPLING_RATE = DC_SAMPLING_RATE
@@ -166,7 +191,7 @@ app.layout = html.Div([
                         id='rpm-input', type='number',
                         placeholder='1400 / 1600 / 1800 / 2000',
                         min=0, step=100, debounce=False,
-                        style={**_INPUT, 'width': 170},
+                        style={**_INPUT, 'width': '100%', 'minWidth': 120},
                     ),
                 ], style={'marginRight': 12}),
 
@@ -177,7 +202,7 @@ app.layout = html.Div([
                         id='load-input', type='number',
                         placeholder='1000–5000',
                         min=0, step=500, debounce=False,
-                        style={**_INPUT, 'width': 130},
+                        style={**_INPUT, 'width': '100%', 'minWidth': 100},
                     ),
                 ], style={'marginRight': 16}),
 
@@ -212,9 +237,9 @@ app.layout = html.Div([
                   'display': 'flex', 'flexDirection': 'column',
                   'justifyContent': 'center', 'alignItems': 'center'}),
 
-    ], style={
+    ], className='top-strip', style={
         'display': 'flex', 'padding': '9px 14px 5px',
-        'gap': 10, 'flexShrink': 0, 'alignItems': 'stretch',
+        'gap': 10, 'flexShrink': 0, 'alignItems': 'stretch', 'flexWrap': 'wrap',
     }),
 
     # ── Graphs row ──────────────────────────────────────────────────────
@@ -246,7 +271,7 @@ app.layout = html.Div([
             'display': 'flex', 'flexDirection': 'column', 'minHeight': 0,
         }),
 
-    ], style={
+    ], className='graphs-row', style={
         'display': 'flex', 'padding': '5px 14px 9px',
         'gap': 10, 'flex': 1, 'minHeight': 0, 'overflow': 'hidden',
     }),
@@ -272,6 +297,7 @@ app.layout = html.Div([
 _YAXIS_VEL = dict(
     gridcolor='#3c4043', color='#9aa0a6', zeroline=True,
     zerolinecolor='#5f6368', zerolinewidth=1,
+    rangemode='tozero',
     title=dict(text='mm/s', font=dict(size=10, color='#9aa0a6')),
     tickfont=dict(size=10),
 )
@@ -298,7 +324,7 @@ _ZERO_CLR  = '#5f6368'
 )
 def update_dashboard(n):
     h   = get_histories()
-    vz  = h['vz']
+    vz  = [abs(v) for v in h['vz']]
     rel = h['rel_s']
 
     VZ_COLOR    = '#4285f4'
