@@ -28,8 +28,9 @@ LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
 # ---------------------------------------------------------------------------
 # Shared data buffers  (written by SerialReader thread, read by Dash callbacks)
 # ---------------------------------------------------------------------------
-vz_history = deque(maxlen=MAX_TIME_PTS)
-ts_history = deque(maxlen=MAX_TIME_PTS)
+vz_history  = deque(maxlen=MAX_TIME_PTS)
+hzz_history = deque(maxlen=MAX_TIME_PTS)
+ts_history  = deque(maxlen=MAX_TIME_PTS)
 
 _lock      = threading.Lock()
 _connected = False
@@ -84,12 +85,17 @@ def _parse_read_response(buf: bytes, start_reg: int, n_regs: int) -> dict:
 class SerialReader(threading.Thread):
     """
     Polls the WTVB02-485 via synchronous Modbus RTU.
-    Only reads register 0x3C — VZ (Z vibration velocity, mm/s, signed 16-bit).
+    Reads registers 0x3C–0x46 in one request:
+      0x3C  VZ  — Z vibration velocity (mm/s, signed 16-bit, ÷10000)
+      0x44  HZX — X vibration frequency (Hz, unsigned, ÷10)
+      0x45  HZY — Y vibration frequency (Hz, unsigned, ÷10)
+      0x46  HZZ — Z vibration frequency (Hz, unsigned, ÷10)
     """
 
     START_REG = 0x3C
-    N_REGS    = 1       # only VZ
+    N_REGS    = 11      # 0x3C … 0x46 inclusive
     REG_VZ    = 0x3C
+    REG_HZZ   = 0x46
 
     def __init__(self, port: str = PORT, baud: int = BAUD):
         super().__init__(daemon=True, name="SerialReader")
@@ -129,8 +135,12 @@ class SerialReader(threading.Thread):
                         raw_vz -= 65536
                     vz_mm_s = float(raw_vz) / 10000.0
 
+                    # Vibration frequency Z-axis (unsigned, unit = 0.1 Hz → divide by 10)
+                    hzz = float(regs.get(self.REG_HZZ, 0)) / 10.0
+
                     with _lock:
                         vz_history.append(vz_mm_s)
+                        hzz_history.append(hzz)
                         ts_history.append(ts)
 
                     with _log_lock:
@@ -141,7 +151,7 @@ class SerialReader(threading.Thread):
                                 (_log_counter, f'{ts:.3f}', iso_time, vz_mm_s)
                             )
 
-                    print(f"vz={vz_mm_s:+8.4f} mm/s      ", end='\r')
+                    print(f"vz={vz_mm_s:+8.4f} mm/s  hzz={hzz:6.1f} Hz      ", end='\r')
 
                     elapsed    = time.time() - t0
                     sleep_time = (1.0 / SAMPLING_RATE) - elapsed
@@ -169,14 +179,16 @@ def get_histories() -> dict:
     -------
     dict with keys:
       'vz'   : list[float]  – VZ mm/s
+      'hzz'  : list[float]  – Z-axis vibration frequency (Hz)
       'ts'   : list[float]  – Unix timestamps (seconds)
       'rel_s': list[float]  – seconds since first sample (x-axis)
     """
     with _lock:
-        vz = list(vz_history)
-        ts = list(ts_history)
+        vz  = list(vz_history)
+        hzz = list(hzz_history)
+        ts  = list(ts_history)
     rel = [t - ts[0] for t in ts] if ts else []
-    return {'vz': vz, 'ts': ts, 'rel_s': rel}
+    return {'vz': vz, 'hzz': hzz, 'ts': ts, 'rel_s': rel}
 
 
 def is_connected() -> bool:

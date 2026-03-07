@@ -134,6 +134,10 @@ app.layout = html.Div([
                     'marginLeft': 6, 'alignSelf': 'flex-end', 'paddingBottom': 3,
                 }),
             ], style={'display': 'flex', 'alignItems': 'baseline', 'justifyContent': 'center'}),
+            html.Div(id='recv-hz', children='', style={
+                'color': '#5f6368', 'fontSize': '0.7rem',
+                'marginTop': 6, 'textAlign': 'center', 'letterSpacing': '0.4px',
+            }),
         ], style={**_CARD, 'flex': 1, 'alignSelf': 'stretch',
                   'display': 'flex', 'flexDirection': 'column', 'justifyContent': 'center', 'alignItems': 'center'}),
 
@@ -315,6 +319,7 @@ _ZERO_CLR  = '#5f6368'
     [Output('vz-time-graph', 'figure'),
      Output('fft-graph',     'figure'),
      Output('rms-value',     'children'),
+     Output('recv-hz',       'children'),
      Output('light-red',     'style'),
      Output('light-yellow',  'style'),
      Output('light-green',   'style'),
@@ -326,6 +331,7 @@ def update_dashboard(n):
     h   = get_histories()
     vz  = [abs(v) for v in h['vz']]
     rel = h['rel_s']
+    hzz = h['hzz']
 
     VZ_COLOR    = '#4285f4'
     EMPTY_STYLE = {'color': '#ea4335', 'fontSize': '0.78rem', 'marginLeft': 18}
@@ -345,6 +351,12 @@ def update_dashboard(n):
     else:
         rms       = 0.0
         rms_label = "—"
+
+    # ── Actual vibration frequency from sensor (reg 0x46) ────────────────────
+    if hzz:
+        hz_label = f"vib. freq (Z)  {hzz[-1]:.1f} Hz"
+    else:
+        hz_label  = "vib. freq (Z)  — Hz"
 
     # ── Traffic light ──────────────────────────────────────────────────
     style_red    = _light_style(rms >= THRESH_YELLOW,
@@ -417,7 +429,7 @@ def update_dashboard(n):
     )
 
     return (
-        time_fig, fft_fig, rms_label,
+        time_fig, fft_fig, rms_label, hz_label,
         style_red, style_yellow, style_green,
         conn_label, conn_style,
     )
