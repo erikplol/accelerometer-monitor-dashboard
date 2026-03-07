@@ -26,15 +26,23 @@ app.index_string = '''
   html, body { margin: 0; padding: 0; background: #17181a; height: 100%; overflow: hidden; }
 
   /* ── Responsive breakpoints ────────────────────────── */
-  @media (max-width: 1024px) {
+
+  /* Large tablet: RMS/Freq cards can shrink, others flex */
+  @media (max-width: 1200px) {
     .top-strip { flex-wrap: wrap !important; }
-    .top-strip > div { flex: 1 1 260px !important; min-width: 220px; }
+    /* RMS + Freq: narrow fixed → allow shrink */
+    .top-strip > div.card-narrow { flex: 1 1 140px !important; min-width: 120px !important; max-width: 200px !important; }
+    /* Severity + Logging: allow shrink */
+    .top-strip > div.card-wide   { flex: 1 1 220px !important; min-width: 200px !important; }
   }
+
+  /* Small tablet / large phone: stack everything */
   @media (max-width: 768px) {
+    .top-strip { flex-wrap: wrap !important; }
+    .top-strip > div { flex: 1 1 100% !important; max-width: 100% !important; }
     .graphs-row { flex-wrap: wrap !important; overflow-y: auto !important; }
-    .graphs-row > div { flex: 1 1 100% !important; min-height: 280px; }
-    .top-strip > div { flex: 1 1 100% !important; }
-    html, body { overflow: auto; height: auto; }
+    .graphs-row > div { flex: 1 1 100% !important; min-height: 260px; }
+    html, body { overflow: auto !important; height: auto !important; }
     #root > div { height: auto !important; overflow: auto !important; }
   }
 </style>
@@ -118,12 +126,12 @@ app.layout = html.Div([
         'display': 'flex', 'alignItems': 'center', 'flexShrink': 0,
     }),
 
-    # ── Top strip: RMS | Severity | Logging ────────────────────────────
+    # ── Top strip: RMS | Freq | Severity | Logging ─────────────────────
     html.Div([
 
         # RMS card
         html.Div([
-            html.Div("RMS Vibration · last 1 s", style={**_LABEL, 'textAlign': 'center'}),
+            html.Div("RMS Vibration", style={**_LABEL, 'textAlign': 'center'}),
             html.Div([
                 html.Span(id='rms-value', children='—', style={
                     'color': '#4285f4', 'fontSize': '2.6rem',
@@ -134,12 +142,26 @@ app.layout = html.Div([
                     'marginLeft': 6, 'alignSelf': 'flex-end', 'paddingBottom': 3,
                 }),
             ], style={'display': 'flex', 'alignItems': 'baseline', 'justifyContent': 'center'}),
-            html.Div(id='recv-hz', children='', style={
-                'color': '#5f6368', 'fontSize': '0.7rem',
-                'marginTop': 6, 'textAlign': 'center', 'letterSpacing': '0.4px',
-            }),
-        ], style={**_CARD, 'flex': 1, 'alignSelf': 'stretch',
-                  'display': 'flex', 'flexDirection': 'column', 'justifyContent': 'center', 'alignItems': 'center'}),
+        ], style={**_CARD, 'flex': '0 0 160px', 'alignSelf': 'stretch',
+                  'display': 'flex', 'flexDirection': 'column', 'justifyContent': 'center', 'alignItems': 'center'},
+           className='card-narrow'),
+
+        # Frequency card
+        html.Div([
+            html.Div("Frequency", style={**_LABEL, 'textAlign': 'center'}),
+            html.Div([
+                html.Span(id='recv-hz', children='—', style={
+                    'color': '#34a853', 'fontSize': '2.6rem',
+                    'fontWeight': 300, 'lineHeight': 1,
+                }),
+                html.Span(" Hz", style={
+                    'color': '#9aa0a6', 'fontSize': '0.85rem',
+                    'marginLeft': 6, 'alignSelf': 'flex-end', 'paddingBottom': 3,
+                }),
+            ], style={'display': 'flex', 'alignItems': 'baseline', 'justifyContent': 'center'}),
+        ], style={**_CARD, 'flex': '0 0 160px', 'alignSelf': 'stretch',
+                  'display': 'flex', 'flexDirection': 'column', 'justifyContent': 'center', 'alignItems': 'center'},
+           className='card-narrow'),
 
         # Traffic-light card
         html.Div([
@@ -180,9 +202,10 @@ app.layout = html.Div([
                 'display': 'flex', 'flexDirection': 'row',
                 'gap': 36, 'alignItems': 'flex-start', 'justifyContent': 'center',
             }),
-        ], style={**_CARD, 'flex': 1, 'alignSelf': 'stretch',
+        ], style={**_CARD, 'flex': 2, 'alignSelf': 'stretch',
                   'display': 'flex', 'flexDirection': 'column', 'alignItems': 'center',
-                  'justifyContent': 'center'}),
+                  'justifyContent': 'center'},
+           className='card-wide'),
 
         # Logging card
         html.Div([
@@ -190,27 +213,27 @@ app.layout = html.Div([
             html.Div([
                 # RPM input
                 html.Div([
-                    html.Label("RPM", style={**_LABEL, 'display': 'block', 'marginBottom': 3}),
+                    html.Label("RPM", style={**_LABEL, 'marginBottom': 3, 'display': 'block'}),
                     dcc.Input(
                         id='rpm-input', type='number',
-                        placeholder='1400 / 1600 / 1800 / 2000',
+                        placeholder='e.g. 1600',
                         min=0, step=100, debounce=False,
-                        style={**_INPUT, 'width': '100%', 'minWidth': 120},
+                        style={**_INPUT, 'width': 110},
                     ),
-                ], style={'marginRight': 12}),
+                ], style={'marginRight': 8}),
 
                 # LOAD input
                 html.Div([
-                    html.Label("Load (W)", style={**_LABEL, 'display': 'block', 'marginBottom': 3}),
+                    html.Label("Load (Watt)", style={**_LABEL, 'marginBottom': 3, 'display': 'block'}),
                     dcc.Input(
                         id='load-input', type='number',
-                        placeholder='1000–5000',
+                        placeholder='e.g. 3000',
                         min=0, step=500, debounce=False,
-                        style={**_INPUT, 'width': '100%', 'minWidth': 100},
+                        style={**_INPUT, 'width': 110},
                     ),
-                ], style={'marginRight': 16}),
+                ], style={'marginRight': 12}),
 
-                # Buttons
+                # Buttons (vertically aligned with inputs)
                 html.Div([
                     html.Label('\u00a0', style={'display': 'block', 'marginBottom': 3, 'fontSize': '0.70rem'}),
                     html.Div([
@@ -220,7 +243,7 @@ app.layout = html.Div([
                             'padding': '6px 14px', 'fontSize': '0.82rem',
                             'cursor': 'pointer', 'fontWeight': 500, 'marginRight': 7,
                         }),
-                        html.Button("■  Stop & Save", id='btn-stop-log', n_clicks=0, style={
+                        html.Button("■  Stop", id='btn-stop-log', n_clicks=0, style={
                             'background': '#ea4335', 'color': '#fff',
                             'border': 'none', 'borderRadius': 5,
                             'padding': '6px 14px', 'fontSize': '0.82rem',
@@ -230,16 +253,17 @@ app.layout = html.Div([
                 ]),
 
                 html.Div(id='log-status', children='', style={
-                    'marginLeft': 14, 'color': '#9aa0a6',
+                    'marginLeft': 10, 'color': '#9aa0a6',
                     'fontSize': '0.75rem', 'alignSelf': 'flex-end', 'paddingBottom': 2,
                 }),
             ], style={
                 'display': 'flex', 'alignItems': 'flex-end',
-                'justifyContent': 'center', 'flexWrap': 'wrap', 'marginTop': 6,
+                'justifyContent': 'center', 'flexWrap': 'nowrap', 'marginTop': 6,
             }),
-        ], style={**_CARD, 'flex': 1, 'alignSelf': 'stretch',
+        ], style={**_CARD, 'flex': 2, 'alignSelf': 'stretch',
                   'display': 'flex', 'flexDirection': 'column',
-                  'justifyContent': 'center', 'alignItems': 'center'}),
+                  'justifyContent': 'center', 'alignItems': 'center'},
+           className='card-wide'),
 
     ], className='top-strip', style={
         'display': 'flex', 'padding': '9px 14px 5px',
@@ -354,9 +378,9 @@ def update_dashboard(n):
 
     # ── Actual vibration frequency from sensor (reg 0x46) ────────────────────
     if hzz:
-        hz_label = f"vib. freq (Z)  {hzz[-1]:.1f} Hz"
+        hz_label = f"{hzz[-1]:.1f}"
     else:
-        hz_label  = "vib. freq (Z)  — Hz"
+        hz_label  = "—"
 
     # ── Traffic light ──────────────────────────────────────────────────
     style_red    = _light_style(rms >= THRESH_YELLOW,
