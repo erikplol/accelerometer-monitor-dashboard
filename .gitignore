@@ -1,1 +1,21 @@
+# Virtual environment
 .venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Logs (collected data)
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
