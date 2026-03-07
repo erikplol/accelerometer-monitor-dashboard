@@ -1,0 +1,8 @@
+# Engine Vibration Log
+# RPM,0
+# Load (W),0
+# Timestamp,20260307_142612
+# Samples,0
+# RMS (mm/s),0.000000
+
+counter,unix_time,iso_time,vz_mm_s

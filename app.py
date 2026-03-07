@@ -1,262 +1,442 @@
+import os
 import dash
-from dash import dcc, html, Input, Output
+from dash import dcc, html, Input, Output, State, ctx
 import plotly.graph_objs as go
 import numpy as np
-import random
-import math
-import time
-from collections import deque
 
-# Initialize Dash app
+from data_collect import (
+    SerialReader,
+    get_histories,
+    is_connected,
+    start_logging,
+    stop_logging,
+    save_log,
+    SAMPLING_RATE as DC_SAMPLING_RATE,
+    MAX_TIME_PTS,
+)
+
+# ── App setup ─────────────────────────────────────────────────────────────────
 app = dash.Dash(__name__, suppress_callback_exceptions=True)
-app.title = "Accelerometer Monitor"
+app.title = "Engine Vibration Monitor"
 
-# Configuration
-WINDOW_SIZE = 256
-SAMPLING_RATE = 10.0  # Hz
-MAX_TIME_POINTS = 100
+SAMPLING_RATE = DC_SAMPLING_RATE
+INTERVAL_MS   = 1000.0 / SAMPLING_RATE
 
-# Data storage
-data = {
-    'x': deque(maxlen=WINDOW_SIZE),
-    'y': deque(maxlen=WINDOW_SIZE),
-    'z': deque(maxlen=WINDOW_SIZE)
+# ISO 10816 vibration severity thresholds (mm/s RMS)
+THRESH_GREEN  = 2.8    # below  → green  (good)
+THRESH_YELLOW = 7.1    # below  → yellow (acceptable), above → red (alarm)
+
+_reader = SerialReader()
+_reader.start()
+
+# ── Style helpers ─────────────────────────────────────────────────────────────
+_CARD = {
+    'background':    '#202124',
+    'borderRadius':  8,
+    'border':        '1px solid #3c4043',
+    'padding':       '14px 18px',
+    'boxSizing':     'border-box',
 }
 
-time_data = {
-    'x': deque(maxlen=MAX_TIME_POINTS),
-    'y': deque(maxlen=MAX_TIME_POINTS),
-    'z': deque(maxlen=MAX_TIME_POINTS),
-    'time': deque(maxlen=MAX_TIME_POINTS)
+_LABEL = {
+    'color':          '#9aa0a6',
+    'fontSize':       '0.70rem',
+    'fontWeight':     600,
+    'textTransform':  'uppercase',
+    'letterSpacing':  '0.8px',
+    'marginBottom':   6,
+    'flexShrink':     0,
 }
 
-# App layout
+_INPUT = {
+    'background':   '#2a2b2f',
+    'color':        '#e8eaed',
+    'border':       '1px solid #3c4043',
+    'borderRadius': 4,
+    'padding':      '6px 10px',
+    'fontSize':     '0.9rem',
+    'width':        130,
+    'outline':      'none',
+    'boxSizing':    'border-box',
+}
+
+
+def _light_style(active: bool, color: str, glow: str) -> dict:
+    if active:
+        return {
+            'width': 46, 'height': 46, 'borderRadius': '50%',
+            'backgroundColor': color,
+            'boxShadow': f'0 0 20px 5px {glow}',
+            'transition': 'background-color 0.3s, box-shadow 0.3s',
+        }
+    return {
+        'width': 46, 'height': 46, 'borderRadius': '50%',
+        'backgroundColor': '#2d2d2d',
+        'boxShadow': 'none',
+        'transition': 'background-color 0.3s, box-shadow 0.3s',
+    }
+
+
+# ── Layout ────────────────────────────────────────────────────────────────────
 app.layout = html.Div([
-    # Compact Header
+
+    # ── Header ──────────────────────────────────────────────────────────
     html.Div([
-        html.Div([
-            html.H1("Accelerometer Monitor", 
-                    style={'margin': '0', 'color': '#e8eaed', 'fontSize': '1.5rem', 'fontWeight': '400', 'letterSpacing': '-0.5px', 'display': 'inline-block'}),
-            html.Div("Real-time FFT Analysis", 
-                   style={'margin': '4px 0 0 0', 'color': '#9aa0a6', 'fontSize': '0.85rem', 'fontWeight': '400', 'display': 'inline-block', 'marginLeft': '16px'}),
-            html.Div([
-                html.Span(f"{SAMPLING_RATE}Hz", style={'margin': '0 20px 0 0', 'color': '#9aa0a6', 'fontSize': '0.85rem'}),
-                html.Span(f"{WINDOW_SIZE} samples", style={'margin': '0 20px 0 0', 'color': '#9aa0a6', 'fontSize': '0.85rem'}),
-                html.Span("100ms refresh", style={'color': '#9aa0a6', 'fontSize': '0.85rem'}),
-            ], className='header-stats', style={'display': 'inline-block', 'float': 'right', 'marginTop': '4px'})
-        ])
+        html.H1("Engine Vibration Monitor", style={
+            'margin': 0, 'color': '#e8eaed',
+            'fontSize': '1.35rem', 'fontWeight': 400, 'letterSpacing': '-0.4px',
+        }),
+        html.Span(id='conn-status', style={'fontSize': '0.78rem', 'marginLeft': 18}),
     ], style={
-        'padding': '20px 24px',
-        'background': '#202124',
-        'borderBottom': '1px solid #3c4043'
+        'padding': '11px 22px', 'background': '#202124',
+        'borderBottom': '1px solid #3c4043',
+        'display': 'flex', 'alignItems': 'center', 'flexShrink': 0,
     }),
-    
-    # Main Content - Grid Layout
+
+    # ── Top strip: RMS | Severity | Logging ────────────────────────────
     html.Div([
-        # Time Domain Column
+
+        # RMS card
         html.Div([
-            html.Div("Time Domain", style={
-                'color': '#9aa0a6',
-                'fontSize': '0.75rem',
-                'fontWeight': '500',
-                'textTransform': 'uppercase',
-                'letterSpacing': '0.5px',
-                'marginBottom': '12px',
-                'paddingLeft': '4px'
-            }),
-            dcc.Graph(id='x-time-graph', style={'height': '27vh', 'marginBottom': '4px'}, config={'displayModeBar': False, 'displaylogo': False}),
-            dcc.Graph(id='y-time-graph', style={'height': '27vh', 'marginBottom': '4px'}, config={'displayModeBar': False, 'displaylogo': False}),
-            dcc.Graph(id='z-time-graph', style={'height': '27vh'}, config={'displayModeBar': False, 'displaylogo': False}),
-        ], className='responsive-column', style={
-            'width': '49%',
-            'display': 'inline-block',
-            'verticalAlign': 'top',
-            'padding': '16px 8px 16px 16px',
-            'boxSizing': 'border-box'
-        }),
-        
-        # Frequency Domain Column
+            html.Div("RMS Vibration · last 1 s", style={**_LABEL, 'textAlign': 'center'}),
+            html.Div([
+                html.Span(id='rms-value', children='—', style={
+                    'color': '#4285f4', 'fontSize': '2.6rem',
+                    'fontWeight': 300, 'lineHeight': 1,
+                }),
+                html.Span(" mm/s", style={
+                    'color': '#9aa0a6', 'fontSize': '0.85rem',
+                    'marginLeft': 6, 'alignSelf': 'flex-end', 'paddingBottom': 3,
+                }),
+            ], style={'display': 'flex', 'alignItems': 'baseline', 'justifyContent': 'center'}),
+        ], style={**_CARD, 'flex': 1, 'alignSelf': 'stretch',
+                  'display': 'flex', 'flexDirection': 'column', 'justifyContent': 'center', 'alignItems': 'center'}),
+
+        # Traffic-light card
         html.Div([
-            html.Div("Frequency Spectrum", style={
-                'color': '#9aa0a6',
-                'fontSize': '0.75rem',
-                'fontWeight': '500',
-                'textTransform': 'uppercase',
-                'letterSpacing': '0.5px',
-                'marginBottom': '12px',
-                'paddingLeft': '4px'
+            html.Div("Severity Level", style={**_LABEL, 'textAlign': 'center', 'marginBottom': 8}),
+            html.Div([
+                # Green
+                html.Div([
+                    html.Div(id='light-green',
+                             style=_light_style(True, '#34a853', 'rgba(52,168,83,0.5)')),
+                    html.Div(f"< {THRESH_GREEN} mm/s", style={
+                        'color': '#9aa0a6', 'fontSize': '0.65rem',
+                        'textAlign': 'center', 'marginTop': 4,
+                    }),
+                ], style={'display': 'flex', 'flexDirection': 'column', 'alignItems': 'center'}),
+
+                # Yellow
+                html.Div([
+                    html.Div(id='light-yellow',
+                             style=_light_style(False, '#fbbc04', 'rgba(251,188,4,0.5)')),
+                    html.Div(f"{THRESH_GREEN}–{THRESH_YELLOW}", style={
+                        'color': '#9aa0a6', 'fontSize': '0.65rem',
+                        'textAlign': 'center', 'marginTop': 4,
+                    }),
+                    html.Div("mm/s", style={'color': '#9aa0a6', 'fontSize': '0.62rem', 'textAlign': 'center'}),
+                ], style={'display': 'flex', 'flexDirection': 'column', 'alignItems': 'center'}),
+
+                # Red
+                html.Div([
+                    html.Div(id='light-red',
+                             style=_light_style(False, '#ea4335', 'rgba(234,67,53,0.5)')),
+                    html.Div(f"≥ {THRESH_YELLOW} mm/s", style={
+                        'color': '#9aa0a6', 'fontSize': '0.65rem',
+                        'textAlign': 'center', 'marginTop': 4,
+                    }),
+                ], style={'display': 'flex', 'flexDirection': 'column', 'alignItems': 'center'}),
+
+            ], style={
+                'display': 'flex', 'flexDirection': 'row',
+                'gap': 36, 'alignItems': 'flex-start', 'justifyContent': 'center',
             }),
-            dcc.Graph(id='x-freq-graph', style={'height': '27vh', 'marginBottom': '4px'}, config={'displayModeBar': False, 'displaylogo': False}),
-            dcc.Graph(id='y-freq-graph', style={'height': '27vh', 'marginBottom': '4px'}, config={'displayModeBar': False, 'displaylogo': False}),
-            dcc.Graph(id='z-freq-graph', style={'height': '27vh'}, config={'displayModeBar': False, 'displaylogo': False}),
-        ], className='responsive-column', style={
-            'width': '49%',
-            'display': 'inline-block',
-            'verticalAlign': 'top',
-            'padding': '16px 16px 16px 8px',
-            'boxSizing': 'border-box'
+        ], style={**_CARD, 'flex': 1, 'alignSelf': 'stretch',
+                  'display': 'flex', 'flexDirection': 'column', 'alignItems': 'center',
+                  'justifyContent': 'center'}),
+
+        # Logging card
+        html.Div([
+            html.Div("Data Logging", style={**_LABEL, 'textAlign': 'center'}),
+            html.Div([
+                # RPM input
+                html.Div([
+                    html.Label("RPM", style={**_LABEL, 'display': 'block', 'marginBottom': 3}),
+                    dcc.Input(
+                        id='rpm-input', type='number',
+                        placeholder='1400 / 1600 / 1800 / 2000',
+                        min=0, step=100, debounce=False,
+                        style={**_INPUT, 'width': 170},
+                    ),
+                ], style={'marginRight': 12}),
+
+                # LOAD input
+                html.Div([
+                    html.Label("Load (W)", style={**_LABEL, 'display': 'block', 'marginBottom': 3}),
+                    dcc.Input(
+                        id='load-input', type='number',
+                        placeholder='1000–5000',
+                        min=0, step=500, debounce=False,
+                        style={**_INPUT, 'width': 130},
+                    ),
+                ], style={'marginRight': 16}),
+
+                # Buttons
+                html.Div([
+                    html.Label('\u00a0', style={'display': 'block', 'marginBottom': 3, 'fontSize': '0.70rem'}),
+                    html.Div([
+                        html.Button("▶  Start", id='btn-start-log', n_clicks=0, style={
+                            'background': '#34a853', 'color': '#fff',
+                            'border': 'none', 'borderRadius': 5,
+                            'padding': '6px 14px', 'fontSize': '0.82rem',
+                            'cursor': 'pointer', 'fontWeight': 500, 'marginRight': 7,
+                        }),
+                        html.Button("■  Stop & Save", id='btn-stop-log', n_clicks=0, style={
+                            'background': '#ea4335', 'color': '#fff',
+                            'border': 'none', 'borderRadius': 5,
+                            'padding': '6px 14px', 'fontSize': '0.82rem',
+                            'cursor': 'pointer', 'fontWeight': 500,
+                        }),
+                    ], style={'display': 'flex', 'alignItems': 'center'}),
+                ]),
+
+                html.Div(id='log-status', children='', style={
+                    'marginLeft': 14, 'color': '#9aa0a6',
+                    'fontSize': '0.75rem', 'alignSelf': 'flex-end', 'paddingBottom': 2,
+                }),
+            ], style={
+                'display': 'flex', 'alignItems': 'flex-end',
+                'justifyContent': 'center', 'flexWrap': 'wrap', 'marginTop': 6,
+            }),
+        ], style={**_CARD, 'flex': 1, 'alignSelf': 'stretch',
+                  'display': 'flex', 'flexDirection': 'column',
+                  'justifyContent': 'center', 'alignItems': 'center'}),
+
+    ], style={
+        'display': 'flex', 'padding': '9px 14px 5px',
+        'gap': 10, 'flexShrink': 0, 'alignItems': 'stretch',
+    }),
+
+    # ── Graphs row ──────────────────────────────────────────────────────
+    html.Div([
+
+        # Graph 1 – VZ vs time
+        html.Div([
+            html.Div("Vibration Velocity — Real Time", style=_LABEL),
+            dcc.Graph(
+                id='vz-time-graph',
+                style={'flex': 1, 'minHeight': 0},
+                config={'displayModeBar': False, 'responsive': True},
+            ),
+        ], style={
+            **_CARD, 'flex': 1, 'marginRight': 6,
+            'display': 'flex', 'flexDirection': 'column', 'minHeight': 0,
         }),
-    ], style={'height': 'calc(100vh - 85px)', 'overflow': 'hidden', 'whiteSpace': 'nowrap'}),
-    
-    # Update interval (100ms = 10Hz)
-    dcc.Interval(
-        id='interval-component',
-        interval=100,  # milliseconds
-        n_intervals=0
-    )
+
+        # Graph 2 – FFT
+        html.Div([
+            html.Div("Frequency Spectrum — FFT", style=_LABEL),
+            dcc.Graph(
+                id='fft-graph',
+                style={'flex': 1, 'minHeight': 0},
+                config={'displayModeBar': False, 'responsive': True},
+            ),
+        ], style={
+            **_CARD, 'flex': 1, 'marginLeft': 6,
+            'display': 'flex', 'flexDirection': 'column', 'minHeight': 0,
+        }),
+
+    ], style={
+        'display': 'flex', 'padding': '5px 14px 9px',
+        'gap': 10, 'flex': 1, 'minHeight': 0, 'overflow': 'hidden',
+    }),
+
+    # ── Stores & interval ────────────────────────────────────────────────
+    dcc.Store(id='log-store', data={'active': False, 'rpm': 0, 'load': 0}),
+    dcc.Interval(id='interval-component', interval=INTERVAL_MS, n_intervals=0),
+
 ], style={
-    'fontFamily': '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
+    'fontFamily': (
+        '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, '
+        '"Helvetica Neue", Arial, sans-serif'
+    ),
     'backgroundColor': '#17181a',
-    'height': '100vh',
-    'margin': '0',
-    'overflow': 'hidden'
+    'height':          '100vh',
+    'margin':          0,
+    'display':         'flex',
+    'flexDirection':   'column',
+    'overflow':        'hidden',
 })
 
-def simulate_accelerometer_data():
-    """Generate simulated accelerometer data"""
-    timestamp = time.time()
-    return {
-        'x': math.sin(timestamp) + random.uniform(-0.1, 0.1),
-        'y': math.cos(timestamp * 1.2) + random.uniform(-0.1, 0.1),
-        'z': math.sin(timestamp / 2.0) + random.uniform(-0.1, 0.1),
-        'time': timestamp
-    }
+# ── Shared plot config ─────────────────────────────────────────────────────────
+_YAXIS_VEL = dict(
+    gridcolor='#3c4043', color='#9aa0a6', zeroline=True,
+    zerolinecolor='#5f6368', zerolinewidth=1,
+    title=dict(text='mm/s', font=dict(size=10, color='#9aa0a6')),
+    tickfont=dict(size=10),
+)
 
-def compute_fft(axis_data):
-    """Compute FFT for given axis data"""
-    if len(axis_data) < WINDOW_SIZE:
-        return [], []
-    
-    samples = np.array(axis_data)
-    # Remove DC component and apply Hamming window
-    windowed = (samples - np.mean(samples)) * np.hamming(WINDOW_SIZE)
-    fft_vals = np.fft.rfft(windowed)
-    
-    # Normalize magnitude
-    freq_magnitude = np.abs(fft_vals) / (WINDOW_SIZE * 0.54)
-    freq_magnitude[1:] *= 2  # Account for positive frequencies only
-    
-    # Compute frequency axis
-    freq_axis = np.fft.rfftfreq(WINDOW_SIZE, d=1.0/SAMPLING_RATE)
-    
-    return freq_axis, freq_magnitude
+
+_DARK_BG   = '#202124'
+_GRID_CLR  = '#3c4043'
+_TICK_CLR  = '#9aa0a6'
+_ZERO_CLR  = '#5f6368'
+
+
+# ── Callbacks ─────────────────────────────────────────────────────────────────
 
 @app.callback(
-    [Output('x-time-graph', 'figure'),
-     Output('y-time-graph', 'figure'),
-     Output('z-time-graph', 'figure'),
-     Output('x-freq-graph', 'figure'),
-     Output('y-freq-graph', 'figure'),
-     Output('z-freq-graph', 'figure')],
-    Input('interval-component', 'n_intervals')
+    [Output('vz-time-graph', 'figure'),
+     Output('fft-graph',     'figure'),
+     Output('rms-value',     'children'),
+     Output('light-red',     'style'),
+     Output('light-yellow',  'style'),
+     Output('light-green',   'style'),
+     Output('conn-status',   'children'),
+     Output('conn-status',   'style')],
+    Input('interval-component', 'n_intervals'),
 )
-def update_graphs(n):
-    """Update all graphs with new data"""
-    # Get new data point
-    new_data = simulate_accelerometer_data()
-    
-    # Update data buffers
-    for axis in ['x', 'y', 'z']:
-        data[axis].append(new_data[axis])
-        time_data[axis].append(new_data[axis])
-    time_data['time'].append(new_data['time'])
-    
-    # Define colors and axis info - clean Google-inspired colors
-    axis_info = {
-        'x': {'color': '#ea4335', 'name': 'X'},
-        'y': {'color': '#34a853', 'name': 'Y'},
-        'z': {'color': '#4285f4', 'name': 'Z'}
-    }
-    
-    time_figures = []
-    freq_figures = []
-    
-    for axis in ['x', 'y', 'z']:
-        info = axis_info[axis]
-        
-        # Create clean time domain figure
-        time_fig = go.Figure()
-        time_fig.add_trace(go.Scatter(
-            y=list(time_data[axis]),
-            mode='lines',
-            line=dict(color=info['color'], width=1.5),
-            hovertemplate='%{y:.3f}<extra></extra>'
+def update_dashboard(n):
+    h   = get_histories()
+    vz  = h['vz']
+    rel = h['rel_s']
+
+    VZ_COLOR    = '#4285f4'
+    EMPTY_STYLE = {'color': '#ea4335', 'fontSize': '0.78rem', 'marginLeft': 18}
+    OK_STYLE    = {'color': '#34a853', 'fontSize': '0.78rem', 'marginLeft': 18}
+
+    # ── Connection ──────────────────────────────────────────────────────
+    connected  = is_connected()
+    conn_label = '● Connected' if connected else '● Disconnected'
+    conn_style = OK_STYLE if connected else EMPTY_STYLE
+
+    # ── RMS over last 1 second ─────────────────────────────────────────
+    n_1s   = max(1, int(SAMPLING_RATE))
+    window = vz[-n_1s:] if vz else []
+    if window:
+        rms       = float(np.sqrt(np.mean(np.array(window) ** 2)))
+        rms_label = f"{rms:.3f}"
+    else:
+        rms       = 0.0
+        rms_label = "—"
+
+    # ── Traffic light ──────────────────────────────────────────────────
+    style_red    = _light_style(rms >= THRESH_YELLOW,
+                                '#ea4335', 'rgba(234,67,53,0.55)')
+    style_yellow = _light_style(THRESH_GREEN <= rms < THRESH_YELLOW,
+                                '#fbbc04', 'rgba(251,188,4,0.55)')
+    style_green  = _light_style(rms < THRESH_GREEN,
+                                '#34a853', 'rgba(52,168,83,0.55)')
+
+    # ── Graph 1: VZ vs time ────────────────────────────────────────────
+    _xaxis_s = go.layout.XAxis(
+        gridcolor=_GRID_CLR, color=_TICK_CLR, zeroline=False,
+        title=go.layout.xaxis.Title(text='s', font=dict(size=10, color=_TICK_CLR)),
+        tickfont=dict(size=10),
+    )
+    _yaxis_v = go.layout.YAxis(
+        **_YAXIS_VEL,
+    )
+    time_fig = go.Figure(
+        data=[
+            go.Scatter(
+                x=rel, y=vz,
+                mode='lines', line=dict(color=VZ_COLOR, width=1.5),
+                name='VZ',
+                hovertemplate='%{y:.4f} mm/s<extra></extra>',
+            )
+        ],
+        layout=go.Layout(
+            plot_bgcolor=_DARK_BG, paper_bgcolor=_DARK_BG,
+            margin=dict(l=52, r=12, t=10, b=32),
+            hovermode='x unified',
+            font=dict(color=_TICK_CLR, size=10),
+            xaxis=_xaxis_s,
+            yaxis=_yaxis_v,
+            showlegend=False,
+        ),
+    )
+
+    # ── Graph 2: FFT ───────────────────────────────────────────────────
+    fft_traces = []
+    if len(vz) >= 8:
+        arr   = np.array(vz) - np.mean(vz)          # remove DC
+        N     = len(arr)
+        freqs = np.fft.rfftfreq(N, d=1.0 / SAMPLING_RATE)
+        mag   = np.abs(np.fft.rfft(arr)) * 2.0 / N  # single-sided peak amplitude
+        freqs, mag = freqs[1:], mag[1:]              # drop DC bin
+        fft_traces.append(go.Bar(
+            x=freqs, y=mag,
+            marker_color=VZ_COLOR, opacity=0.85,
+            hovertemplate='%{x:.2f} Hz  %{y:.4f} mm/s<extra></extra>',
         ))
-        time_fig.update_layout(
-            title=dict(
-                text=f'{info["name"]}-axis',
-                font=dict(size=13, color='#9aa0a6'),
-                x=0.02,
-                xanchor='left',
-                y=0.98,
-                yanchor='top'
-            ),
-            xaxis=dict(
-                gridcolor='#3c4043',
-                color='#9aa0a6',
-                showticklabels=False,
-                zeroline=False
-            ),
-            yaxis=dict(
-                gridcolor='#3c4043',
-                color='#9aa0a6',
-                range=[-1.5, 1.5],
-                zeroline=True,
-                zerolinecolor='#5f6368',
-                zerolinewidth=1
-            ),
-            plot_bgcolor='#202124',
-            paper_bgcolor='#202124',
-            margin=dict(l=45, r=10, t=30, b=25),
-            showlegend=False,
-            hovermode='closest'
-        )
-        time_figures.append(time_fig)
-        
-        # Create clean frequency domain figure
-        freq_axis_vals, freq_magnitude = compute_fft(data[axis])
-        
-        freq_fig = go.Figure()
-        if len(freq_axis_vals) > 0:
-            freq_fig.add_trace(go.Scatter(
-                x=freq_axis_vals,
-                y=freq_magnitude,
-                mode='lines',
-                line=dict(color=info['color'], width=1.5),
-                fill='tozeroy',
-                fillcolor=f'rgba({int(info["color"][1:3], 16)}, {int(info["color"][3:5], 16)}, {int(info["color"][5:7], 16)}, 0.2)',
-                hovertemplate='%{x:.2f} Hz<br>%{y:.3f}<extra></extra>'
-            ))
-        
-        freq_fig.update_layout(
-            title=dict(
-                text=f'{info["name"]}-axis',
-                font=dict(size=13, color='#9aa0a6'),
-                x=0.02,
-                xanchor='left',
-                y=0.98,
-                yanchor='top'
-            ),
-            xaxis=dict(
-                gridcolor='#3c4043',
-                color='#9aa0a6',
+    fft_fig = go.Figure(
+        data=fft_traces,
+        layout=go.Layout(
+            plot_bgcolor=_DARK_BG, paper_bgcolor=_DARK_BG,
+            margin=dict(l=52, r=12, t=10, b=32),
+            hovermode='x unified',
+            font=dict(color=_TICK_CLR, size=10),
+            xaxis=go.layout.XAxis(
+                gridcolor=_GRID_CLR, color=_TICK_CLR, zeroline=False,
+                title=go.layout.xaxis.Title(
+                    text='Hz', font=dict(size=10, color=_TICK_CLR)
+                ),
                 tickfont=dict(size=10),
-                zeroline=False
             ),
-            yaxis=dict(
-                gridcolor='#3c4043',
-                color='#9aa0a6',
-                zeroline=False
-            ),
-            plot_bgcolor='#202124',
-            paper_bgcolor='#202124',
-            margin=dict(l=45, r=10, t=30, b=30),
+            yaxis=go.layout.YAxis(**_YAXIS_VEL),
+            bargap=0.1,
             showlegend=False,
-            hovermode='closest'
+        ),
+    )
+
+    return (
+        time_fig, fft_fig, rms_label,
+        style_red, style_yellow, style_green,
+        conn_label, conn_style,
+    )
+
+
+@app.callback(
+    [Output('log-status', 'children'),
+     Output('log-store',  'data')],
+    [Input('btn-start-log', 'n_clicks'),
+     Input('btn-stop-log',  'n_clicks')],
+    [State('rpm-input',  'value'),
+     State('load-input', 'value'),
+     State('log-store',  'data')],
+    prevent_initial_call=True,
+)
+def handle_logging(n_start, n_stop, rpm, load_w, log_data):
+    triggered = ctx.triggered_id
+    active    = log_data.get('active', False)
+
+    if triggered == 'btn-start-log':
+        if active:
+            return "⚠ Already recording — stop first.", log_data
+        rpm_val  = int(rpm)    if rpm    is not None else 0
+        load_val = int(load_w) if load_w is not None else 0
+        start_logging()
+        return (
+            f"● Recording…  RPM = {rpm_val}  |  Load = {load_val} W",
+            {'active': True, 'rpm': rpm_val, 'load': load_val},
         )
-        freq_figures.append(freq_fig)
-    
-    return time_figures + freq_figures
+
+    if triggered == 'btn-stop-log':
+        if not active:
+            return "⚠ No active recording.", log_data
+        data     = stop_logging()
+        rpm_val  = log_data.get('rpm',  0)
+        load_val = log_data.get('load', 0)
+        path     = save_log(rpm_val, load_val, data)
+        fname    = os.path.basename(path)
+        return (
+            f"✔ Saved {len(data)} samples → {fname}",
+            {'active': False, 'rpm': rpm_val, 'load': load_val},
+        )
+
+    return "", log_data
+
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=8080)
+    app.run(debug=True, dev_tools_ui=False, host='0.0.0.0', port=7777)
