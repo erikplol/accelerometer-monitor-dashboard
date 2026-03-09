@@ -136,7 +136,7 @@ class SerialReader(threading.Thread):
                     vz_mm_s = float(raw_vz) / 10000.0
 
                     # Vibration frequency Z-axis (unsigned, unit = 0.1 Hz → divide by 10)
-                    hzz = float(regs.get(self.REG_HZZ, 0)) / 10.0
+                    hzz = float(regs.get(self.REG_HZZ, 0)) / 100.0
 
                     with _lock:
                         vz_history.append(vz_mm_s)

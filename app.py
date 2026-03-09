@@ -1,3 +1,5 @@
+import io
+import csv as _csv
 import os
 import dash
 from dash import dcc, html, Input, Output, State, ctx
@@ -367,6 +369,7 @@ app.layout = html.Div([
     # ── Stores & interval ────────────────────────────────────────────────
     dcc.Store(id='log-store', data={'active': False, 'rpm': 0, 'load': 0}),
     dcc.Interval(id='interval-component', interval=INTERVAL_MS, n_intervals=0),
+    dcc.Download(id='download-csv'),
 
 ], style={
     'fontFamily': '"Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
@@ -513,7 +516,8 @@ def update_dashboard(n):
 
 @app.callback(
     [Output('log-status', 'children'),
-     Output('log-store',  'data')],
+     Output('log-store',  'data'),
+     Output('download-csv', 'data')],
     [Input('btn-start-log', 'n_clicks'),
      Input('btn-stop-log',  'n_clicks')],
     [State('rpm-input',  'value'),
@@ -527,29 +531,49 @@ def handle_logging(n_start, n_stop, rpm, load_w, log_data):
 
     if triggered == 'btn-start-log':
         if active:
-            return "⚠ Already recording — stop first.", log_data
+            return "⚠ Already recording — stop first.", log_data, dash.no_update
         rpm_val  = int(rpm)    if rpm    is not None else 0
         load_val = int(load_w) if load_w is not None else 0
         start_logging()
         return (
             f"● Recording…  RPM = {rpm_val}  |  Load = {load_val} W",
             {'active': True, 'rpm': rpm_val, 'load': load_val},
+            dash.no_update,
         )
 
     if triggered == 'btn-stop-log':
         if not active:
-            return "⚠ No active recording.", log_data
+            return "⚠ No active recording.", log_data, dash.no_update
         data     = stop_logging()
         rpm_val  = log_data.get('rpm',  0)
         load_val = log_data.get('load', 0)
         path     = save_log(rpm_val, load_val, data)
         fname    = os.path.basename(path)
+
+        # Build CSV content in memory for browser download
+        import time as _time
+        vz_vals   = [row[3] for row in data] if data else []
+        rms       = float(np.sqrt(np.mean(np.array(vz_vals) ** 2))) if vz_vals else 0.0
+        timestamp = os.path.splitext(fname)[0].rsplit('_', 2)
+        buf = io.StringIO()
+        w   = _csv.writer(buf)
+        w.writerow(['# Engine Vibration Log'])
+        w.writerow(['# RPM',        rpm_val])
+        w.writerow(['# Load (W)',   load_val])
+        w.writerow(['# Samples',    len(data)])
+        w.writerow(['# RMS (mm/s)', f'{rms:.6f}'])
+        w.writerow([])
+        w.writerow(['counter', 'unix_time', 'iso_time', 'vz_mm_s'])
+        for entry in data:
+            w.writerow([entry[0], entry[1], entry[2], f'{entry[3]:.6f}'])
+
         return (
-            f"✔ Saved {len(data)} samples → {fname}",
+            f"✔ Saved & downloading {len(data)} samples — {fname}",
             {'active': False, 'rpm': rpm_val, 'load': load_val},
+            dcc.send_string(buf.getvalue(), filename=fname),
         )
 
-    return "", log_data
+    return "", log_data, dash.no_update
 
 
 if __name__ == '__main__':
