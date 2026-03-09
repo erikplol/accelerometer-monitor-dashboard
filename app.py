@@ -291,6 +291,7 @@ app.layout = html.Div([
                         html.Button("▶  Start", id='btn-start-log', n_clicks=0,
                             className='btn-start',
                             style={
+
                                 'background': 'linear-gradient(135deg, #238636, #2ea043)',
                                 'color': '#fff', 'border': '1px solid #2ea043',
                                 'borderRadius': 8, 'padding': '7px 16px',
@@ -552,4 +553,4 @@ def handle_logging(n_start, n_stop, rpm, load_w, log_data):
 
 
 if __name__ == '__main__':
-    app.run(debug=True, dev_tools_ui=False, host='0.0.0.0', port=7777)
+    app.run(debug=True, dev_tools_ui=False, use_reloader=False, host='0.0.0.0', port=7777)
