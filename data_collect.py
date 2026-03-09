@@ -86,7 +86,7 @@ class SerialReader(threading.Thread):
     """
     Polls the WTVB02-485 via synchronous Modbus RTU.
     Reads registers 0x3C–0x46 in one request:
-      0x3C  VZ  — Z vibration velocity (mm/s, signed 16-bit, ÷100)
+      0x3C  VZ  — Z vibration velocity (mm/s, signed 16-bit, ÷1000)
       0x44  HZX — X vibration frequency (Hz, unsigned, ÷10)
       0x45  HZY — Y vibration frequency (Hz, unsigned, ÷10)
       0x46  HZZ — Z vibration frequency (Hz, unsigned, ÷10)
@@ -133,7 +133,7 @@ class SerialReader(threading.Thread):
                     raw_vz = regs.get(self.REG_VZ, 0)
                     if raw_vz > 32767:
                         raw_vz -= 65536
-                    vz_mm_s = float(raw_vz) / 100.0
+                    vz_mm_s = float(raw_vz) / 1000.0
 
                     # Vibration frequency Z-axis (unsigned, unit = 0.1 Hz → divide by 10)
                     hzz = float(regs.get(self.REG_HZZ, 0)) / 10.0
