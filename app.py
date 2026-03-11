@@ -473,7 +473,7 @@ def update_dashboard(n):
 
     # ── Graph 2: FFT of the latest rolling window ───────────────────────
     vz_raw     = h['vz']
-    N_WIN_SECS = 4                              # 4-second window → 0.25 Hz resolution
+    N_WIN_SECS = 30                             # 30-second window → 0.033 Hz resolution
     N_FFT      = int(SAMPLING_RATE * N_WIN_SECS)
     fft_traces = []
 
