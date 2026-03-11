@@ -89,7 +89,7 @@ class SerialReader(threading.Thread):
       0x3C  VZ  — Z vibration velocity (mm/s, signed 16-bit, ÷10000)
       0x44  HZX — X vibration frequency (Hz, unsigned, ÷10)
       0x45  HZY — Y vibration frequency (Hz, unsigned, ÷10)
-      0x46  HZZ — Z vibration frequency (Hz, unsigned, ÷10)
+      0x46  HZZ — Z vibration frequency (Hz, unsigned, ÷100)
     """
 
     START_REG = 0x3C
@@ -135,8 +135,8 @@ class SerialReader(threading.Thread):
                         raw_vz -= 65536
                     vz_mm_s = float(raw_vz) / 10000.0
 
-                    # Vibration frequency Z-axis (unsigned, unit = 0.1 Hz → divide by 10)
-                    hzz = float(regs.get(self.REG_HZZ, 0)) / 10.0
+                    # Vibration frequency Z-axis (unsigned, unit = 0.01 Hz → divide by 100)
+                    hzz = float(regs.get(self.REG_HZZ, 0)) / 100.0
 
                     with _lock:
                         vz_history.append(vz_mm_s)
