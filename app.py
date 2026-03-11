@@ -482,12 +482,17 @@ def update_dashboard(n):
     if len(vz_raw) >= N_FFT:
         segment = np.array(vz_raw[-N_FFT:])
         ts_seg  = np.array(h['ts'][-N_FFT:])
-        # Use actual timestamps — real poll rate is often lower than SAMPLING_RATE
-        # due to Modbus round-trip overhead at 9600 baud (each tx ≈ 37 ms+).
-        # Nyquist = actual_fs / 2, so the axis reflects what the data can actually show.
-        actual_fs = float(N_FFT - 1) / (ts_seg[-1] - ts_seg[0]) if ts_seg[-1] > ts_seg[0] else SAMPLING_RATE
+        # Estimate actual sample rate from the median inter-sample interval.
+        # This is robust to single outlier gaps caused by Modbus retries or
+        # CRC errors, unlike the two-endpoint estimate which a single stall skews.
+        diffs     = np.diff(ts_seg)
+        med_dt    = np.median(diffs)
+        actual_fs = (1.0 / med_dt) if med_dt > 0 else SAMPLING_RATE
+        # Clamp to a sane range (±50 % of nominal) to guard against corrupted ts.
+        actual_fs = float(np.clip(actual_fs, SAMPLING_RATE * 0.5, SAMPLING_RATE * 1.5))
         segment = segment - segment.mean()      # remove DC offset
-        window  = np.hanning(N_FFT)
+        # Use the periodic (DFT-even) Hann window for spectral analysis.
+        window  = np.hanning(N_FFT + 1)[:-1]
         mag     = np.abs(np.fft.rfft(segment * window)) * 2.0 / window.sum()
         freqs   = np.fft.rfftfreq(N_FFT, d=1.0 / actual_fs)
         freqs   = freqs[1:]                     # drop DC bin
