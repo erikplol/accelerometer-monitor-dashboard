@@ -20,8 +20,8 @@ PORT          = '/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0'
 BAUD          = 9600
 MODBUS_ADDR   = 0x50
 
-MAX_TIME_PTS  = 600    # 60-second rolling window @ 20 Hz
-SAMPLING_RATE = 10.0    # Hz
+MAX_TIME_PTS  = 600   # 60-second rolling window @ 20 Hz
+SAMPLING_RATE = 10.0   # Hz  (Nyquist = 10 Hz → resolves sensor 8 Hz)
 
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
 

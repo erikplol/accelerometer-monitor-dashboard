@@ -5,6 +5,15 @@ from dash import dcc, html, Input, Output, State, ctx
 import plotly.graph_objs as go
 import numpy as np
 
+try:
+    import RPi.GPIO as GPIO
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setwarnings(False)
+    _GPIO_AVAILABLE = True
+except (ImportError, RuntimeError):
+    GPIO = None
+    _GPIO_AVAILABLE = False
+
 from data_collect import (
     SerialReader,
     get_histories,
@@ -81,6 +90,23 @@ THRESH_YELLOW = 7.1    # below  → yellow (acceptable), above → red (alarm)
 
 _reader = SerialReader()
 _reader.start()
+
+# ── GPIO traffic lights ───────────────────────────────────────────────────────
+GPIO_RED    = 17
+GPIO_YELLOW = 27
+GPIO_GREEN  = 22
+
+if _GPIO_AVAILABLE:
+    for _pin in (GPIO_RED, GPIO_YELLOW, GPIO_GREEN):
+        GPIO.setup(_pin, GPIO.OUT, initial=GPIO.LOW)
+
+
+def _set_gpio_lights(red: bool, yellow: bool, green: bool) -> None:
+    if not _GPIO_AVAILABLE:
+        return
+    GPIO.output(GPIO_RED,    GPIO.HIGH if red    else GPIO.LOW)
+    GPIO.output(GPIO_YELLOW, GPIO.HIGH if yellow else GPIO.LOW)
+    GPIO.output(GPIO_GREEN,  GPIO.HIGH if green  else GPIO.LOW)
 
 # ── Style helpers ─────────────────────────────────────────────────────────────
 _BG        = '#0f1117'
@@ -435,12 +461,15 @@ def update_dashboard(n):
         hz_label  = "—"
 
     # ── Traffic light ──────────────────────────────────────────────────
-    style_red    = _light_style(rms >= THRESH_YELLOW,
-                                '#f85149', 'rgba(248,81,73,0.55)')
-    style_yellow = _light_style(THRESH_GREEN <= rms < THRESH_YELLOW,
-                                '#d29922', 'rgba(210,153,34,0.55)')
-    style_green  = _light_style(rms < THRESH_GREEN,
-                                '#3fb950', 'rgba(63,185,80,0.55)')
+    is_red    = rms >= THRESH_YELLOW
+    is_yellow = THRESH_GREEN <= rms < THRESH_YELLOW
+    is_green  = rms < THRESH_GREEN
+
+    _set_gpio_lights(is_red, is_yellow, is_green)
+
+    style_red    = _light_style(is_red,    '#f85149', 'rgba(248,81,73,0.55)')
+    style_yellow = _light_style(is_yellow, '#d29922', 'rgba(210,153,34,0.55)')
+    style_green  = _light_style(is_green,  '#3fb950', 'rgba(63,185,80,0.55)')
 
     # ── Graph 1: VZ vs time ────────────────────────────────────────────
     _xaxis_s = go.layout.XAxis(
@@ -504,6 +533,25 @@ def update_dashboard(n):
             name='Spectrum',
             hovertemplate='%{x:.2f} Hz · %{y:.4f} mm/s<extra></extra>',
         ))
+    # Vertical marker at the sensor-reported vibration frequency (HZZ)
+    sensor_hz  = hzz[-1] if hzz else None
+    fft_shapes = []
+    fft_annots = []
+    if sensor_hz and sensor_hz > 0:
+        fft_shapes.append(dict(
+            type='line', xref='x', yref='paper',
+            x0=sensor_hz, x1=sensor_hz, y0=0, y1=1,
+            line=dict(color='#f0883e', width=1.5, dash='dot'),
+        ))
+        fft_annots.append(dict(
+            xref='x', yref='paper',
+            x=sensor_hz, y=0.97,
+            text=f'sensor {sensor_hz:.1f} Hz',
+            showarrow=False,
+            font=dict(size=9, color='#f0883e'),
+            xanchor='left', xshift=4,
+        ))
+
     fft_fig = go.Figure(
         data=fft_traces,
         layout=go.Layout(
@@ -519,6 +567,8 @@ def update_dashboard(n):
                 tickfont=dict(size=10),
             ),
             yaxis=go.layout.YAxis(**_YAXIS_VEL),
+            shapes=fft_shapes,
+            annotations=fft_annots,
             showlegend=False,
         ),
     )
