@@ -505,69 +505,82 @@ def update_dashboard(n):
     N_WIN_SECS = 30                             # 30-second window → 0.033 Hz resolution
     N_FFT      = int(SAMPLING_RATE * N_WIN_SECS)
     fft_traces = []
+    max_mag    = 0.0
+    nyquist    = SAMPLING_RATE / 2.0
 
     if len(vz_raw) >= N_FFT:
         segment = np.array(vz_raw[-N_FFT:])
         ts_seg  = np.array(h['ts'][-N_FFT:])
-        # Estimate actual sample rate from the median inter-sample interval.
-        # This is robust to single outlier gaps caused by Modbus retries or
-        # CRC errors, unlike the two-endpoint estimate which a single stall skews.
         diffs     = np.diff(ts_seg)
         med_dt    = np.median(diffs)
         actual_fs = (1.0 / med_dt) if med_dt > 0 else SAMPLING_RATE
-        # Clamp to a sane range (±50 % of nominal) to guard against corrupted ts.
         actual_fs = float(np.clip(actual_fs, SAMPLING_RATE * 0.5, SAMPLING_RATE * 1.5))
-        segment = segment - segment.mean()      # remove DC offset
-        # Use the periodic (DFT-even) Hann window for spectral analysis.
+        nyquist   = actual_fs / 2.0
+        segment = segment - segment.mean()
         window  = np.hanning(N_FFT + 1)[:-1]
         mag     = np.abs(np.fft.rfft(segment * window)) / window.sum()
-        mag[1:-1] *= 2.0    # double interior bins only; DC (0) and Nyquist (-1) are real-only
+        mag[1:-1] *= 2.0
         freqs   = np.fft.rfftfreq(N_FFT, d=1.0 / actual_fs)
-        freqs   = freqs[1:]                     # drop DC bin
+        freqs   = freqs[1:]
         mag     = mag[1:]
+        max_mag = float(np.max(mag)) if len(mag) > 0 else 0.0
         fft_traces.append(go.Scatter(
             x=freqs.tolist(), y=mag.tolist(),
             mode='lines', fill='tozeroy',
             line=dict(color=VZ_COLOR, width=1.5),
             fillcolor='rgba(88,166,255,0.15)',
-            name='Spectrum',
+            name='Envelope',
             hovertemplate='%{x:.2f} Hz · %{y:.4f} mm/s<extra></extra>',
         ))
-    # Vertical marker at the sensor-reported vibration frequency (HZZ)
+
+    # Sensor-reported mechanical vibration frequency as a prominent bar.
+    # The VZ register is a DSP-processed envelope — its FFT shows intensity
+    # modulation (low Hz), not the mechanical frequency. The bar makes the
+    # sensor-computed frequency visible in the same chart.
     sensor_hz  = hzz[-1] if hzz else None
-    fft_shapes = []
     fft_annots = []
+    x_max      = max(nyquist, (sensor_hz or 0) * 1.2, 5.0)
+
     if sensor_hz and sensor_hz > 0:
-        fft_shapes.append(dict(
-            type='line', xref='x', yref='paper',
-            x0=sensor_hz, x1=sensor_hz, y0=0, y1=1,
-            line=dict(color='#f0883e', width=1.5, dash='dot'),
+        bar_h = max_mag if max_mag > 0 else 0.01
+        bar_w = max(0.08, x_max * 0.012)
+        fft_traces.append(go.Bar(
+            x=[sensor_hz],
+            y=[bar_h],
+            name='Sensor Hz',
+            marker=dict(
+                color='rgba(240,136,62,0.75)',
+                line=dict(color='#f0883e', width=1.5),
+            ),
+            width=bar_w,
+            hovertemplate=f'Sensor vibration: {sensor_hz:.1f} Hz<extra></extra>',
         ))
         fft_annots.append(dict(
             xref='x', yref='paper',
             x=sensor_hz, y=0.97,
-            text=f'sensor {sensor_hz:.1f} Hz',
+            text=f'{sensor_hz:.1f} Hz',
             showarrow=False,
             font=dict(size=9, color='#f0883e'),
-            xanchor='left', xshift=4,
+            xanchor='center',
         ))
 
     fft_fig = go.Figure(
         data=fft_traces,
         layout=go.Layout(
+            barmode='overlay',
             plot_bgcolor=_CARD_BG, paper_bgcolor=_CARD_BG,
             margin=dict(l=52, r=12, t=10, b=32),
             hovermode='x unified',
             font=dict(color=_TICK_CLR, size=10),
             xaxis=go.layout.XAxis(
                 gridcolor=_GRID_CLR, color=_TICK_CLR, zeroline=False,
+                range=[0, x_max],
                 title=go.layout.xaxis.Title(
                     text='Hz', font=dict(size=10, color=_TICK_CLR)
                 ),
                 tickfont=dict(size=10),
             ),
             yaxis=go.layout.YAxis(**_YAXIS_VEL),
-            shapes=fft_shapes,
             annotations=fft_annots,
             showlegend=False,
         ),
