@@ -239,7 +239,7 @@ def save_log(rpm: int, load_w: int, data: list) -> str:
     filename  = f'vibration_RPM{rpm}_LOAD{load_w}W_{timestamp}.csv'
     filepath  = os.path.join(LOG_DIR, filename)
 
-    vz_vals = [row[3] for row in data] if data else []
+    vz_vals = [row[2] for row in data] if data else []
     rms     = float(np.sqrt(np.mean(np.array(vz_vals) ** 2))) if vz_vals else 0.0
 
     with open(filepath, 'w', newline='') as f:

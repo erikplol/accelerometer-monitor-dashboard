@@ -492,8 +492,9 @@ def update_dashboard(n):
         actual_fs = float(np.clip(actual_fs, SAMPLING_RATE * 0.5, SAMPLING_RATE * 1.5))
         segment = segment - segment.mean()      # remove DC offset
         # Use the periodic (DFT-even) Hann window for spectral analysis.
-        window  = np.hanning(N_FFT + 1)[:-1]
-        mag     = np.abs(np.fft.rfft(segment * window)) * 2.0 / window.sum()
+        window        = np.hanning(N_FFT + 1)[:-1]
+        mag           = np.abs(np.fft.rfft(segment * window)) / window.sum()
+        mag[1:-1]    *= 2.0     # double interior bins only; DC (0) and Nyquist (-1) are real-only
         freqs   = np.fft.rfftfreq(N_FFT, d=1.0 / actual_fs)
         freqs   = freqs[1:]                     # drop DC bin
         mag     = mag[1:]
