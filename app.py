@@ -1,4 +1,5 @@
 import os
+import time
 import dash
 from dash import dcc, html, Input, Output, State, ctx
 import plotly.graph_objs as go
@@ -362,7 +363,7 @@ app.layout = html.Div([
     }),
 
     # ── Stores & interval ────────────────────────────────────────────────
-    dcc.Store(id='log-store', data={'active': False, 'rpm': 0, 'load': 0}),
+    dcc.Store(id='log-store', data={'active': False, 'rpm': 0, 'load': 0, 'start_time': 0}),
     dcc.Interval(id='interval-component', interval=INTERVAL_MS, n_intervals=0),
 
 ], style={
@@ -529,17 +530,35 @@ def update_dashboard(n):
     )
 
 
+LOG_DURATION_S = 30
+
+
+def _do_stop(log_data, auto=False):
+    """Stop recording, save, and return (status_msg, new_log_data)."""
+    data     = stop_logging()
+    rpm_val  = log_data.get('rpm',  0)
+    load_val = log_data.get('load', 0)
+    path     = save_log(rpm_val, load_val, data)
+    fname    = os.path.basename(path)
+    prefix   = '✔ Auto-saved' if auto else '✔ Saved'
+    return (
+        f"{prefix} {len(data)} samples — {fname}",
+        {'active': False, 'rpm': rpm_val, 'load': load_val, 'start_time': 0},
+    )
+
+
 @app.callback(
     [Output('log-status', 'children'),
      Output('log-store',  'data')],
-    [Input('btn-start-log', 'n_clicks'),
-     Input('btn-stop-log',  'n_clicks')],
+    [Input('btn-start-log',       'n_clicks'),
+     Input('btn-stop-log',        'n_clicks'),
+     Input('interval-component',  'n_intervals')],
     [State('rpm-input',  'value'),
      State('load-input', 'value'),
      State('log-store',  'data')],
     prevent_initial_call=True,
 )
-def handle_logging(n_start, n_stop, rpm, load_w, log_data):
+def handle_logging(n_start, n_stop, n_intervals, rpm, load_w, log_data):
     triggered = ctx.triggered_id
     active    = log_data.get('active', False)
 
@@ -550,25 +569,30 @@ def handle_logging(n_start, n_stop, rpm, load_w, log_data):
         load_val = int(load_w) if load_w is not None else 0
         start_logging()
         return (
-            f"● Recording…  RPM = {rpm_val}  |  Load = {load_val} W",
-            {'active': True, 'rpm': rpm_val, 'load': load_val},
+            f"● Recording…  {LOG_DURATION_S}s  |  RPM = {rpm_val}  |  Load = {load_val} W",
+            {'active': True, 'rpm': rpm_val, 'load': load_val, 'start_time': time.time()},
         )
 
     if triggered == 'btn-stop-log':
         if not active:
             return "⚠ No active recording.", log_data
-        data     = stop_logging()
+        return _do_stop(log_data)
+
+    if triggered == 'interval-component':
+        if not active:
+            return dash.no_update, dash.no_update
+        elapsed   = time.time() - log_data.get('start_time', time.time())
+        remaining = LOG_DURATION_S - elapsed
+        if remaining <= 0:
+            return _do_stop(log_data, auto=True)
         rpm_val  = log_data.get('rpm',  0)
         load_val = log_data.get('load', 0)
-        path     = save_log(rpm_val, load_val, data)
-        fname    = os.path.basename(path)
-
         return (
-            f"✔ Saved {len(data)} samples — {fname}",
-            {'active': False, 'rpm': rpm_val, 'load': load_val},
+            f"● Recording…  {int(remaining)}s left  |  RPM = {rpm_val}  |  Load = {load_val} W",
+            dash.no_update,
         )
 
-    return "", log_data
+    return dash.no_update, dash.no_update
 
 
 if __name__ == '__main__':
