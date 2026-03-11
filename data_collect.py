@@ -20,8 +20,8 @@ PORT          = '/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0'
 BAUD          = 9600
 MODBUS_ADDR   = 0x50
 
-MAX_TIME_PTS  = 1200    # 60-second rolling window @ 20 Hz
-SAMPLING_RATE = 20.0    # Hz
+MAX_TIME_PTS  = 600    # 60-second rolling window @ 20 Hz
+SAMPLING_RATE = 10.0    # Hz
 
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
 
@@ -67,7 +67,7 @@ def _parse_read_response(buf: bytes, start_reg: int, n_regs: int) -> dict:
     expected = 5 + 2 * n_regs
     if len(buf) < expected:
         return {}
-    crc_calc = _crc_helper.get_crc(list(buf), len(buf) - 2)
+    crc_calc = _crc_helper.get_crc(list(buf), len(buf) - 2)stop
     crc_recv = (buf[-2] << 8) | buf[-1]
     if crc_calc != crc_recv:
         return {}
