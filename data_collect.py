@@ -20,8 +20,8 @@ PORT          = '/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0'
 BAUD          = 9600
 MODBUS_ADDR   = 0x50
 
-MAX_TIME_PTS  = 600     # 60-second rolling window @ 10 Hz
-SAMPLING_RATE = 10.0    # Hz — realistic ceiling at 9600 baud (≈36 ms/frame + overhead)
+MAX_TIME_PTS  = 1200    # 60-second rolling window @ 20 Hz
+SAMPLING_RATE = 20.0    # Hz
 
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
 
@@ -106,7 +106,7 @@ class SerialReader(threading.Thread):
     def run(self):
         global _connected, _log_active, _log_buffer, _log_counter
         request  = _build_read_request(MODBUS_ADDR, self.START_REG, self.N_REGS)
-        resp_len = 5 + 2 * self.N_REGS   # 5 header + 2 bytes × N_REGS
+        resp_len = 5 + 2 * self.N_REGS   # 7 bytes for 1 register
 
         try:
             with serial.Serial(self.port, BAUD, timeout=1.0) as ser:
@@ -116,25 +116,17 @@ class SerialReader(threading.Thread):
                 while not self._stop_event.is_set():
                     t0 = time.time()
 
+                    ser.reset_input_buffer()
                     ser.write(request)
-                    ser.flush()          # ensure all request bytes are transmitted
                     buf = ser.read(resp_len)
 
                     if len(buf) < resp_len:
-                        # Drain any stale/partial response bytes before retrying.
-                        # reset_input_buffer() is intentionally placed HERE (after
-                        # the failed read) and not before write(), so we never
-                        # discard a valid response that is still arriving.
-                        ser.reset_input_buffer()
                         print(f"[SerialReader] Short read: got {len(buf)}/{resp_len} bytes")
-                        time.sleep(0.1)  # back off — avoid flooding device on error
                         continue
 
                     regs = _parse_read_response(buf, self.START_REG, self.N_REGS)
                     if not regs:
-                        ser.reset_input_buffer()
                         print("[SerialReader] CRC error or bad response, retrying…")
-                        time.sleep(0.1)
                         continue
 
                     ts     = time.time()
@@ -239,7 +231,7 @@ def save_log(rpm: int, load_w: int, data: list) -> str:
     filename  = f'vibration_RPM{rpm}_LOAD{load_w}W_{timestamp}.csv'
     filepath  = os.path.join(LOG_DIR, filename)
 
-    vz_vals = [row[2] for row in data] if data else []
+    vz_vals = [row[3] for row in data] if data else []
     rms     = float(np.sqrt(np.mean(np.array(vz_vals) ** 2))) if vz_vals else 0.0
 
     with open(filepath, 'w', newline='') as f:
