@@ -67,7 +67,7 @@ def _parse_read_response(buf: bytes, start_reg: int, n_regs: int) -> dict:
     expected = 5 + 2 * n_regs
     if len(buf) < expected:
         return {}
-    crc_calc = _crc_helper.get_crc(list(buf), len(buf) - 2)stop
+    crc_calc = _crc_helper.get_crc(list(buf), len(buf) - 2)
     crc_recv = (buf[-2] << 8) | buf[-1]
     if crc_calc != crc_recv:
         return {}
