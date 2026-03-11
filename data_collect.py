@@ -39,7 +39,7 @@ _connected = False
 # Logging state
 # ---------------------------------------------------------------------------
 _log_active  = False
-_log_buffer  = []        # list of (counter, unix_ts_str, iso_time, vz_mm_s)
+_log_buffer  = []        # list of (counter, time_str, vz_mm_s)
 _log_counter = 0
 _log_lock    = threading.Lock()
 
@@ -146,9 +146,9 @@ class SerialReader(threading.Thread):
                     with _log_lock:
                         if _log_active:
                             _log_counter += 1
-                            iso_time = time.strftime('%Y-%m-%dT%H:%M:%S', time.localtime(ts))
+                            time_str = time.strftime('%d %b %Y  %H:%M:%S', time.localtime(ts))
                             _log_buffer.append(
-                                (_log_counter, f'{ts:.3f}', iso_time, vz_mm_s)
+                                (_log_counter, time_str, vz_mm_s)
                             )
 
                     print(f"vz={vz_mm_s:+8.4f} mm/s  hzz={hzz:6.1f} Hz      ", end='\r')
@@ -222,7 +222,7 @@ def save_log(rpm: int, load_w: int, data: list) -> str:
 
     File content:
       - Metadata header rows (RPM, Load, Timestamp, Samples, RMS)
-      - Data rows: counter, unix_time, iso_time, vz_mm_s
+      - Data rows: counter, time, vz_mm_s
 
     Returns the absolute path of the saved file.
     """
@@ -243,9 +243,9 @@ def save_log(rpm: int, load_w: int, data: list) -> str:
         writer.writerow(['# Samples',    len(data)])
         writer.writerow(['# RMS (mm/s)', f'{rms:.6f}'])
         writer.writerow([])
-        writer.writerow(['counter', 'unix_time', 'iso_time', 'vz_mm_s'])
+        writer.writerow(['counter', 'time', 'vz_mm_s'])
         for entry in data:
-            writer.writerow([entry[0], entry[1], entry[2], f'{entry[3]:.6f}'])
+            writer.writerow([entry[0], entry[1], f'{entry[2]:.6f}'])
 
     print(f"[Logger] Saved → {filepath}  ({len(data)} samples, RMS={rms:.4f} mm/s)")
     return filepath

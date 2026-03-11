@@ -1,20 +1,131 @@
 import io
 import csv as _csv
+import math
 import os
+import random
+import threading
+import time
+from collections import deque
+
 import dash
 from dash import dcc, html, Input, Output, State, ctx
 import plotly.graph_objs as go
 import numpy as np
 
-from data_collect import (
-    SerialReader,
-    get_histories,
-    is_connected,
-    start_logging,
-    stop_logging,
-    save_log,
-    SAMPLING_RATE as DC_SAMPLING_RATE,
-)
+# ── Simulation configuration ──────────────────────────────────────────────────
+SAMPLING_RATE  = 50.0          # Hz  (Nyquist = 25 Hz — safely captures 5–15 Hz signals)
+MAX_TIME_PTS   = 3000          # 60-second rolling window @ 50 Hz
+LOG_DIR        = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+
+# Fundamental at 8 Hz + 2nd harmonic (16 Hz) + 3rd harmonic (24 Hz), typical engine pattern
+_SIM_COMPS     = [(8.0, 5.0), (16.0, 2.5), (24.0, 1.0)]
+_SIM_NOISE_STD = 0.4   # mm/s white noise std-dev
+# HZZ drifts: dominant sine freq ± 2 Hz modulated at 0.03 Hz, plus per-sample jitter
+_SIM_HZZ_BASE  = 8.0   # Hz — centre of the reported sensor frequency
+
+# ── Shared data buffers ────────────────────────────────────────────────────────
+_vz_history  = deque(maxlen=MAX_TIME_PTS)
+_hzz_history = deque(maxlen=MAX_TIME_PTS)
+_ts_history  = deque(maxlen=MAX_TIME_PTS)
+_lock        = threading.Lock()
+_connected   = False
+
+# ── Logging state ─────────────────────────────────────────────────────────────
+_log_active  = False
+_log_buffer  = []
+_log_counter = 0
+_log_lock    = threading.Lock()
+
+
+class SimulatedReader(threading.Thread):
+    def __init__(self):
+        super().__init__(daemon=True, name='SimulatedReader')
+        self._stop_event = threading.Event()
+
+    def run(self):
+        global _connected, _log_active, _log_buffer, _log_counter
+        _connected = True
+        print('[SimulatedReader] Started — generating synthetic vibration data.')
+        t_start = time.time()
+        while not self._stop_event.is_set():
+            t0    = time.time()
+            t_rel = t0 - t_start
+            vz    = sum(a * math.sin(2 * math.pi * f * t_rel) for f, a in _SIM_COMPS)
+            vz   += random.gauss(0.0, _SIM_NOISE_STD)
+            # Sensor-reported dominant frequency: slow ±2 Hz drift + ±0.3 Hz jitter
+            hzz   = _SIM_HZZ_BASE + 2.0 * math.sin(2 * math.pi * 0.03 * t_rel)
+            hzz  += random.gauss(0.0, 0.3)
+            hzz   = max(5.0, min(15.0, hzz))
+            with _lock:
+                _vz_history.append(vz)
+                _hzz_history.append(hzz)
+                _ts_history.append(t0)
+            with _log_lock:
+                if _log_active:
+                    _log_counter += 1
+                    time_str = time.strftime('%d %b %Y  %H:%M:%S', time.localtime(t0))
+                    _log_buffer.append((_log_counter, time_str, vz))
+            elapsed = time.time() - t0
+            sleep_t = (1.0 / SAMPLING_RATE) - elapsed
+            if sleep_t > 0:
+                time.sleep(sleep_t)
+        _connected = False
+        print('[SimulatedReader] Stopped.')
+
+    def stop(self):
+        self._stop_event.set()
+
+
+def get_histories() -> dict:
+    with _lock:
+        vz  = list(_vz_history)
+        hzz = list(_hzz_history)
+        ts  = list(_ts_history)
+    rel = [t - ts[0] for t in ts] if ts else []
+    return {'vz': vz, 'hzz': hzz, 'ts': ts, 'rel_s': rel}
+
+
+def is_connected() -> bool:
+    return _connected
+
+
+def start_logging() -> None:
+    global _log_active, _log_buffer, _log_counter
+    with _log_lock:
+        _log_active  = True
+        _log_buffer  = []
+        _log_counter = 0
+
+
+def stop_logging() -> list:
+    global _log_active
+    with _log_lock:
+        _log_active = False
+        data        = list(_log_buffer)
+    return data
+
+
+def save_log(rpm: int, load_w: int, data: list) -> str:
+    os.makedirs(LOG_DIR, exist_ok=True)
+    timestamp = time.strftime('%Y%m%d_%H%M%S')
+    filename  = f'vibration_SIM_RPM{rpm}_LOAD{load_w}W_{timestamp}.csv'
+    filepath  = os.path.join(LOG_DIR, filename)
+    vz_vals   = [row[2] for row in data] if data else []
+    rms       = float(np.sqrt(np.mean(np.array(vz_vals) ** 2))) if vz_vals else 0.0
+    with open(filepath, 'w', newline='') as f:
+        writer = _csv.writer(f)
+        writer.writerow(['# Engine Vibration Log (Simulated)'])
+        writer.writerow(['# RPM',        rpm])
+        writer.writerow(['# Load (W)',   load_w])
+        writer.writerow(['# Timestamp',  timestamp])
+        writer.writerow(['# Samples',    len(data)])
+        writer.writerow(['# RMS (mm/s)', f'{rms:.6f}'])
+        writer.writerow([])
+        writer.writerow(['counter', 'time', 'vz_mm_s'])
+        for entry in data:
+            writer.writerow([entry[0], entry[1], f'{entry[2]:.6f}'])
+    print(f'[SimLogger] Saved → {filepath}  ({len(data)} samples, RMS={rms:.4f} mm/s)')
+    return filepath
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 app = dash.Dash(__name__, suppress_callback_exceptions=True)
@@ -71,16 +182,15 @@ app.index_string = '''
 <body>{%app_entry%}{%config%}{%scripts%}{%renderer%}</body>
 </html>
 '''
-app.title = "Engine Vibration Monitor"
+app.title = "Engine Vibration Monitor · Simulation"
 
-SAMPLING_RATE = DC_SAMPLING_RATE
-INTERVAL_MS   = 1000.0 / SAMPLING_RATE
+INTERVAL_MS = 1000.0 / SAMPLING_RATE
 
 # ISO 10816 vibration severity thresholds (mm/s RMS)
 THRESH_GREEN  = 2.8    # below  → green  (good)
 THRESH_YELLOW = 7.1    # below  → yellow (acceptable), above → red (alarm)
 
-_reader = SerialReader()
+_reader = SimulatedReader()
 _reader.start()
 
 # ── Style helpers ─────────────────────────────────────────────────────────────
@@ -473,7 +583,7 @@ def update_dashboard(n):
         ),
     )
 
-    # ── Graph 2: FFT of the latest rolling window ───────────────────────
+    # ── Graph 2: FFT of the latest rolling window ───────────────────────────
     vz_raw     = h['vz']
     N_WIN_SECS = 4                              # 4-second window → 0.25 Hz resolution
     N_FFT      = int(SAMPLING_RATE * N_WIN_SECS)
@@ -562,7 +672,7 @@ def handle_logging(n_start, n_stop, rpm, load_w, log_data):
         rms       = float(np.sqrt(np.mean(np.array(vz_vals) ** 2))) if vz_vals else 0.0
         buf = io.StringIO()
         w   = _csv.writer(buf)
-        w.writerow(['# Engine Vibration Log'])
+        w.writerow(['# Engine Vibration Log (Simulated)'])
         w.writerow(['# RPM',        rpm_val])
         w.writerow(['# Load (W)',   load_val])
         w.writerow(['# Samples',    len(data)])
@@ -582,4 +692,4 @@ def handle_logging(n_start, n_stop, rpm, load_w, log_data):
 
 
 if __name__ == '__main__':
-    app.run(debug=True, dev_tools_ui=False, use_reloader=False, host='0.0.0.0', port=7777)
+    app.run(debug=True, dev_tools_ui=False, use_reloader=False, host='0.0.0.0', port=7778)
