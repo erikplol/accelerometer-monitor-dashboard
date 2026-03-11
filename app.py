@@ -481,10 +481,15 @@ def update_dashboard(n):
 
     if len(vz_raw) >= N_FFT:
         segment = np.array(vz_raw[-N_FFT:])
+        ts_seg  = np.array(h['ts'][-N_FFT:])
+        # Use actual timestamps — real poll rate is often lower than SAMPLING_RATE
+        # due to Modbus round-trip overhead at 9600 baud (each tx ≈ 37 ms+).
+        # Nyquist = actual_fs / 2, so the axis reflects what the data can actually show.
+        actual_fs = float(N_FFT - 1) / (ts_seg[-1] - ts_seg[0]) if ts_seg[-1] > ts_seg[0] else SAMPLING_RATE
         segment = segment - segment.mean()      # remove DC offset
         window  = np.hanning(N_FFT)
         mag     = np.abs(np.fft.rfft(segment * window)) * 2.0 / window.sum()
-        freqs   = np.fft.rfftfreq(N_FFT, d=1.0 / SAMPLING_RATE)
+        freqs   = np.fft.rfftfreq(N_FFT, d=1.0 / actual_fs)
         freqs   = freqs[1:]                     # drop DC bin
         mag     = mag[1:]
         fft_traces.append(go.Scatter(

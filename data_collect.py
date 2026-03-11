@@ -17,11 +17,11 @@ from vb01_python_sdk.device_model import DeviceModel  # CRC helper only
 # Configuration
 # ---------------------------------------------------------------------------
 PORT          = '/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0'
-BAUD          = 9600
+BAUD          = 115200
 MODBUS_ADDR   = 0x50
 
 MAX_TIME_PTS  = 600     # 60-second rolling window @ 10 Hz
-SAMPLING_RATE = 10.0    # Hz
+SAMPLING_RATE = 20.0    # Hz
 
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
 
