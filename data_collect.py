@@ -101,7 +101,9 @@ class SerialReader(threading.Thread):
         super().__init__(daemon=True, name="SerialReader")
         self.port        = port
         self.baud        = baud
-        self._stop_event = threading.Event()
+        self._stop_event  = threading.Event()
+        self._pause_event = threading.Event()
+        self._pause_event.set()   # starts in running state
 
     def run(self):
         global _connected, _log_active, _log_buffer, _log_counter
@@ -114,6 +116,7 @@ class SerialReader(threading.Thread):
                 print(f"[SerialReader] Connected → {self.port}  @  {BAUD} baud")
 
                 while not self._stop_event.is_set():
+                    self._pause_event.wait()  # blocks while paused for save
                     t0 = time.time()
 
                     ser.reset_input_buffer()
@@ -163,6 +166,14 @@ class SerialReader(threading.Thread):
         finally:
             _connected = False
             print("\n[SerialReader] Disconnected.")
+
+    def pause(self):
+        """Suspend polling (call before a blocking save)."""
+        self._pause_event.clear()
+
+    def resume(self):
+        """Resume polling after save completes."""
+        self._pause_event.set()
 
     def stop(self):
         self._stop_event.set()
@@ -231,7 +242,7 @@ def save_log(rpm: int, load_w: int, data: list) -> str:
     filename  = f'vibration_RPM{rpm}_LOAD{load_w}W_{timestamp}.csv'
     filepath  = os.path.join(LOG_DIR, filename)
 
-    vz_vals = [row[3] for row in data] if data else []
+    vz_vals = [row[2] for row in data] if data else []
     rms     = float(np.sqrt(np.mean(np.array(vz_vals) ** 2))) if vz_vals else 0.0
 
     with open(filepath, 'w', newline='') as f:

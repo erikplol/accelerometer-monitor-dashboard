@@ -534,13 +534,17 @@ LOG_DURATION_S = 30
 
 
 def _do_stop(log_data, auto=False):
-    """Stop recording, save, and return (status_msg, new_log_data)."""
-    data     = stop_logging()
-    rpm_val  = log_data.get('rpm',  0)
-    load_val = log_data.get('load', 0)
-    path     = save_log(rpm_val, load_val, data)
-    fname    = os.path.basename(path)
-    prefix   = '✔ Auto-saved' if auto else '✔ Saved'
+    """Stop recording, pause the serial reader, save, then resume."""
+    _reader.pause()
+    try:
+        data     = stop_logging()
+        rpm_val  = log_data.get('rpm',  0)
+        load_val = log_data.get('load', 0)
+        path     = save_log(rpm_val, load_val, data)
+        fname    = os.path.basename(path)
+    finally:
+        _reader.resume()
+    prefix = '✔ Auto-saved' if auto else '✔ Saved'
     return (
         f"{prefix} {len(data)} samples — {fname}",
         {'active': False, 'rpm': rpm_val, 'load': load_val, 'start_time': 0},
