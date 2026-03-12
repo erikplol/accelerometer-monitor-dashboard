@@ -81,8 +81,9 @@ app.index_string = '''
 '''
 app.title = "Engine Vibration Monitor"
 
-SAMPLING_RATE = DC_SAMPLING_RATE
-INTERVAL_MS   = 1000.0 / SAMPLING_RATE
+SAMPLING_RATE   = DC_SAMPLING_RATE
+UI_INTERVAL_MS  = 200   # UI refresh rate (ms) — decoupled from sampling rate
+MAX_DISPLAY_PTS = 800   # max points plotted per graph
 
 # ISO 10816 vibration severity thresholds (mm/s RMS)
 THRESH_GREEN  = 2.8    # below  → green  (good)
@@ -390,7 +391,7 @@ app.layout = html.Div([
 
     # ── Stores & interval ────────────────────────────────────────────────
     dcc.Store(id='log-store', data={'active': False, 'rpm': 0, 'load': 0, 'start_time': 0}),
-    dcc.Interval(id='interval-component', interval=INTERVAL_MS, n_intervals=0),
+    dcc.Interval(id='interval-component', interval=UI_INTERVAL_MS, n_intervals=0),
 
 ], style={
     'fontFamily': '"Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
@@ -406,7 +407,6 @@ app.layout = html.Div([
 _YAXIS_VEL = dict(
     gridcolor=_GRID_CLR, color=_TICK_CLR, zeroline=True,
     zerolinecolor=_ZERO_CLR, zerolinewidth=1,
-    rangemode='tozero',
     title=dict(text='mm/s', font=dict(size=10, color=_TICK_CLR)),
     tickfont=dict(size=10),
     showgrid=True,
@@ -430,10 +430,19 @@ _YAXIS_VEL = dict(
     Input('interval-component', 'n_intervals'),
 )
 def update_dashboard(n):
-    h   = get_histories()
-    vz  = [abs(v) for v in h['vz']]
-    rel = h['rel_s']
-    hzz = h['hzz']
+    h      = get_histories()
+    vz_all  = h['vz']
+    rel_all = h['rel_s']
+    hzz    = h['hzz']
+
+    # Downsample for display — keeps the browser responsive
+    if len(vz_all) > MAX_DISPLAY_PTS:
+        step = len(vz_all) // MAX_DISPLAY_PTS
+        vz  = vz_all[::step]
+        rel = rel_all[::step]
+    else:
+        vz  = vz_all
+        rel = rel_all
 
     VZ_COLOR    = '#58a6ff'
     EMPTY_STYLE = {'color': '#f85149', 'fontSize': '0.82rem', 'marginLeft': 18}
@@ -446,7 +455,7 @@ def update_dashboard(n):
 
     # ── RMS over last 1 second ─────────────────────────────────────────
     n_1s   = max(1, int(SAMPLING_RATE))
-    window = vz[-n_1s:] if vz else []
+    window = vz_all[-n_1s:] if vz_all else []
     if window:
         rms       = float(np.sqrt(np.mean(np.array(window) ** 2)))
         rms_label = f"{rms:.3f}"
@@ -497,81 +506,47 @@ def update_dashboard(n):
             xaxis=_xaxis_s,
             yaxis=_yaxis_v,
             showlegend=False,
+            uirevision='vz-time',
         ),
     )
 
-    # ── Graph 2: FFT of the latest rolling window ───────────────────────
-    vz_raw     = h['vz']
-    N_WIN_SECS = 30                             # 30-second window → 0.033 Hz resolution
-    N_FFT      = int(SAMPLING_RATE * N_WIN_SECS)
-    fft_traces = []
-    max_mag    = 0.0
-    nyquist    = SAMPLING_RATE / 2.0
+    # ── Graph 2: FFT ──────────────────────────────────────────────────────
 
-    if len(vz_raw) >= N_FFT:
-        segment = np.array(vz_raw[-N_FFT:])
-        ts_seg  = np.array(h['ts'][-N_FFT:])
-        diffs     = np.diff(ts_seg)
-        med_dt    = np.median(diffs)
-        actual_fs = (1.0 / med_dt) if med_dt > 0 else SAMPLING_RATE
-        actual_fs = float(np.clip(actual_fs, SAMPLING_RATE * 0.5, SAMPLING_RATE * 1.5))
-        nyquist   = actual_fs / 2.0
-        segment = segment - segment.mean()
-        window  = np.hanning(N_FFT + 1)[:-1]
-        mag     = np.abs(np.fft.rfft(segment * window)) / window.sum()
-        mag[1:-1] *= 2.0
-        freqs   = np.fft.rfftfreq(N_FFT, d=1.0 / actual_fs)
-        freqs   = freqs[1:]
-        mag     = mag[1:]
-        max_mag = float(np.max(mag)) if len(mag) > 0 else 0.0
+    fft_traces = []
+    fft_shapes = []
+
+    if len(vz_all) >= 64:
+        # Use configured SAMPLING_RATE for frequency axis — same as fft.py
+        N        = max(64, min(len(vz_all), int(SAMPLING_RATE * 30)))
+        segment  = np.array(vz_all[-N:])
+        segment  = segment - segment.mean()
+        fft_vals = np.abs(np.fft.rfft(segment)) / N
+        freqs    = np.fft.rfftfreq(N, d=1.0 / SAMPLING_RATE)
+
+        # Drop DC bin (index 0)
+        freqs    = freqs[1:]
+        fft_vals = fft_vals[1:]
+
         fft_traces.append(go.Scatter(
-            x=freqs.tolist(), y=mag.tolist(),
+            x=freqs.tolist(), y=fft_vals.tolist(),
             mode='lines', fill='tozeroy',
             line=dict(color=VZ_COLOR, width=1.5),
             fillcolor='rgba(88,166,255,0.15)',
-            name='Envelope',
-            hovertemplate='%{x:.2f} Hz · %{y:.4f} mm/s<extra></extra>',
+            name='FFT',
+            hovertemplate='%{x:.2f} Hz  %{y:.5f} mm/s<extra></extra>',
         ))
 
-    # Sensor-reported mechanical vibration frequency as a prominent bar.
-    # The VZ register is a DSP-processed envelope — its FFT shows intensity
-    # modulation (low Hz), not the mechanical frequency. The bar makes the
-    # sensor-computed frequency visible in the same chart.
-    sensor_hz  = hzz[-1] if hzz else None
-    fft_annots = []
-    x_max      = max(nyquist, (sensor_hz or 0) * 1.2, 5.0)
-
-    if sensor_hz and sensor_hz > 0:
-        bar_h = max_mag if max_mag > 0 else 0.01
-        bar_w = max(0.08, x_max * 0.012)
-        fft_traces.append(go.Bar(
-            x=[sensor_hz],
-            y=[bar_h],
-            name='Sensor Hz',
-            marker=dict(
-                color='rgba(240,136,62,0.75)',
-                line=dict(color='#f0883e', width=1.5),
-            ),
-            width=bar_w,
-            hovertemplate=f'Sensor vibration: {sensor_hz:.1f} Hz<extra></extra>',
-        ))
-        fft_annots.append(dict(
-            xref='x', yref='paper',
-            x=sensor_hz, y=0.97,
-            text=f'{sensor_hz:.1f} Hz',
-            showarrow=False,
-            font=dict(size=9, color='#f0883e'),
-            xanchor='center',
-        ))
+    sensor_hz = hzz[-1] if hzz else None
+    x_max     = max(SAMPLING_RATE / 2.0, (sensor_hz or 0) * 1.2, 5.0)
 
     fft_fig = go.Figure(
         data=fft_traces,
         layout=go.Layout(
-            barmode='overlay',
             plot_bgcolor=_CARD_BG, paper_bgcolor=_CARD_BG,
             margin=dict(l=52, r=12, t=10, b=32),
             hovermode='x unified',
             font=dict(color=_TICK_CLR, size=10),
+            shapes=fft_shapes,
             xaxis=go.layout.XAxis(
                 gridcolor=_GRID_CLR, color=_TICK_CLR, zeroline=False,
                 range=[0, x_max],
@@ -580,9 +555,11 @@ def update_dashboard(n):
                 ),
                 tickfont=dict(size=10),
             ),
-            yaxis=go.layout.YAxis(**_YAXIS_VEL),
-            annotations=fft_annots,
+            yaxis=go.layout.YAxis(
+                **{**_YAXIS_VEL, 'rangemode': 'nonnegative'},
+            ),
             showlegend=False,
+            uirevision='fft',
         ),
     )
 

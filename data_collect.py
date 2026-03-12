@@ -17,11 +17,11 @@ from vb01_python_sdk.device_model import DeviceModel  # CRC helper only
 # Configuration
 # ---------------------------------------------------------------------------
 PORT          = '/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0'
-BAUD          = 9600
+BAUD          = 115200
 MODBUS_ADDR   = 0x50
 
-MAX_TIME_PTS  = 600   # 60-second rolling window @ 20 Hz
-SAMPLING_RATE = 10.0   # Hz  (Nyquist = 10 Hz → resolves sensor 8 Hz)
+MAX_TIME_PTS  = int(60 * 150)   # 60-second rolling window @ 150 Hz
+SAMPLING_RATE = 150.0   # Hz
 
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
 
@@ -86,10 +86,10 @@ class SerialReader(threading.Thread):
     """
     Polls the WTVB02-485 via synchronous Modbus RTU.
     Reads registers 0x3C–0x46 in one request:
-      0x3C  VZ  — Z vibration velocity (mm/s, signed 16-bit, ÷10000)
+      0x3C  VZ  — Z vibration velocity (mm/s, signed 16-bit)
       0x44  HZX — X vibration frequency (Hz, unsigned, ÷10)
       0x45  HZY — Y vibration frequency (Hz, unsigned, ÷10)
-      0x46  HZZ — Z vibration frequency (Hz, unsigned, ÷100)
+      0x46  HZZ — Z vibration frequency (Hz, unsigned, ÷10)
     """
 
     START_REG = 0x3C
@@ -136,10 +136,10 @@ class SerialReader(threading.Thread):
                     raw_vz = regs.get(self.REG_VZ, 0)
                     if raw_vz > 32767:
                         raw_vz -= 65536
-                    vz_mm_s = float(raw_vz) / 10000.0
+                    vz_mm_s = float(raw_vz) / 100.0
 
-                    # Vibration frequency Z-axis (unsigned, unit = 0.01 Hz → divide by 100)
-                    hzz = float(regs.get(self.REG_HZZ, 0)) / 100.0
+                    # Vibration frequency Z-axis (Hz, unsigned) — per datasheet: value ÷ 10
+                    hzz = float(regs.get(self.REG_HZZ, 0)) / 10.0
 
                     with _lock:
                         vz_history.append(vz_mm_s)
