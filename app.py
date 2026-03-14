@@ -82,10 +82,16 @@ app.index_string = '''
 app.title = "Engine Vibration Monitor"
 
 SAMPLING_RATE   = DC_SAMPLING_RATE
-UI_INTERVAL_MS  = 200   # UI refresh rate (ms) — decoupled from sampling rate
-MAX_DISPLAY_PTS = 800   # max points plotted per graph
+UI_INTERVAL_MS  = 350   # UI refresh rate (ms) — decoupled from sampling rate
+MAX_DISPLAY_PTS = 500   # max points plotted per graph
+FFT_WINDOW_SECONDS = 5.0
+FFT_UPDATE_EVERY_N_INTERVALS = 3  # recompute FFT every ~1.05s with current interval
 
-# ISO 10816 vibration severity thresholds (mm/s RMS)
+_fft_cache_x = []
+_fft_cache_y = []
+_fft_cache_signature = None
+
+# Thresholds for the currently displayed VZ RMS signal
 THRESH_GREEN  = 2.8    # below  → green  (good)
 THRESH_YELLOW = 7.1    # below  → yellow (acceptable), above → red (alarm)
 
@@ -195,7 +201,7 @@ app.layout = html.Div([
 
         # RMS card
         html.Div([
-            html.Div("RMS Velocity", style={**_LABEL, 'textAlign': 'center'}),
+            html.Div("RMS VZ", style={**_LABEL, 'textAlign': 'center'}),
             html.Div([
                 html.Span(id='rms-value', children='—', style={
                     'color': '#58a6ff',
@@ -360,7 +366,7 @@ app.layout = html.Div([
 
         # Graph 1 – VZ vs time
         html.Div([
-            html.Div("Velocity · Real Time", style={**_LABEL, 'marginBottom': 4}),
+            html.Div("VZ · Real Time", style={**_LABEL, 'marginBottom': 4}),
             dcc.Graph(
                 id='vz-time-graph',
                 style={'flex': 1, 'minHeight': 0},
@@ -430,7 +436,11 @@ _YAXIS_VEL = dict(
     Input('interval-component', 'n_intervals'),
 )
 def update_dashboard(n):
+    global _fft_cache_x, _fft_cache_y, _fft_cache_signature
+
     h      = get_histories()
+    raw_az_all = h.get('raw_az_u16', [])
+    raw_vz_all = h.get('raw_vz_u16', [])
     vz_all  = h['vz']
     rel_all = h['rel_s']
     hzz    = h['hzz']
@@ -491,7 +501,7 @@ def update_dashboard(n):
     )
     time_fig = go.Figure(
         data=[
-            go.Scatter(
+            go.Scattergl(
                 x=rel, y=vz,
                 mode='lines', line=dict(color=VZ_COLOR, width=1.5),
                 name='VZ',
@@ -515,25 +525,43 @@ def update_dashboard(n):
     fft_traces = []
     fft_shapes = []
 
-    if len(vz_all) >= 64:
-        # Use configured SAMPLING_RATE for frequency axis — same as fft.py
-        N        = max(64, min(len(vz_all), int(SAMPLING_RATE * 30)))
-        segment  = np.array(vz_all[-N:])
-        segment  = segment - segment.mean()
-        fft_vals = np.abs(np.fft.rfft(segment)) / N
-        freqs    = np.fft.rfftfreq(N, d=1.0 / SAMPLING_RATE)
+    n_fft_window = max(64, int(SAMPLING_RATE * FFT_WINDOW_SECONDS))
+    should_update_fft = (n % FFT_UPDATE_EVERY_N_INTERVALS == 0)
+    if len(raw_az_all) >= n_fft_window and should_update_fft:
+        # FFT uses Z-axis acceleration amplitude in g.
+        # Reinterpret unsigned 16-bit raw data as signed two's-complement,
+        # then scale using the datasheet formula: AZ = raw/32768 * 16 g.
+        N = n_fft_window
+        raw_segment = np.array(raw_az_all[-N:], dtype=np.int32)
+        signed_segment = np.where(raw_segment >= 32768, raw_segment - 65536, raw_segment)
+        segment = signed_segment.astype(float) / 32768.0 * 16.0
+        segment = segment - segment.mean()
+
+        window        = np.hanning(N)
+        coherent_gain = float(window.mean()) if N > 0 else 1.0
+        spectrum      = np.fft.rfft(segment * window)
+        fft_vals      = np.abs(spectrum) / (N * coherent_gain)
+        freqs         = np.fft.rfftfreq(N, d=1.0 / SAMPLING_RATE)
+
+        if len(fft_vals) > 2:
+            fft_vals[1:-1] *= 2.0
 
         # Drop DC bin (index 0)
         freqs    = freqs[1:]
         fft_vals = fft_vals[1:]
 
-        fft_traces.append(go.Scatter(
-            x=freqs.tolist(), y=fft_vals.tolist(),
+        _fft_cache_x = freqs.tolist()
+        _fft_cache_y = fft_vals.tolist()
+        _fft_cache_signature = (len(raw_az_all), raw_az_all[-1], N)
+
+    if _fft_cache_signature is not None and _fft_cache_x:
+        fft_traces.append(go.Scattergl(
+            x=_fft_cache_x, y=_fft_cache_y,
             mode='lines', fill='tozeroy',
             line=dict(color=VZ_COLOR, width=1.5),
             fillcolor='rgba(88,166,255,0.15)',
             name='FFT',
-            hovertemplate='%{x:.2f} Hz  %{y:.5f} mm/s<extra></extra>',
+            hovertemplate='%{x:.2f} Hz  %{y:.5f} g<extra></extra>',
         ))
 
     sensor_hz = hzz[-1] if hzz else None
@@ -556,7 +584,11 @@ def update_dashboard(n):
                 tickfont=dict(size=10),
             ),
             yaxis=go.layout.YAxis(
-                **{**_YAXIS_VEL, 'rangemode': 'nonnegative'},
+                **{
+                    **_YAXIS_VEL,
+                    'title': dict(text='g', font=dict(size=10, color=_TICK_CLR)),
+                    'rangemode': 'nonnegative',
+                },
             ),
             showlegend=False,
             uirevision='fft',

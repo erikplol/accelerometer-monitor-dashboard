@@ -1,41 +1,33 @@
-import numpy as np
+import csv
+
 import matplotlib.pyplot as plt
-import re
+import numpy as np
 
 # ===== USER CONFIG =====
 FILE_PATH = "logs/vibration_RPM2000_LOAD5000W_20260311_233531 copy.csv"
-SAMPLING_FREQUENCY = 24  # Hz (adjust to your sensor sampling rate)
+SIGNAL_COLUMN = "vz_mm_s"
+SAMPLING_FREQUENCY = 150  # Hz (match the sensor / poll rate used during logging)
 # =======================
 
 
 def read_vibration_file(file_path):
-    vz_values = []
+    values = []
 
-    with open(file_path, "r") as f:
-        lines = f.readlines()
+    with open(file_path, "r", newline="") as handle:
+        rows = [line for line in handle if not line.startswith("#") and line.strip()]
 
-    data_section = False
+    if not rows:
+        return np.array(values)
 
-    for line in lines:
-
-        # Detect start of data
-        if line.strip().startswith("counter"):
-            data_section = True
-            continue
-
-        if data_section:
-            parts = line.strip().split(",")
-
-            if len(parts) < 3:
+    reader = csv.DictReader(rows)
+    for row in reader:
+        try:
+            values.append(float(row[SIGNAL_COLUMN]))
+        except (KeyError, TypeError, ValueError):
+            if not row:
                 continue
 
-            try:
-                vz = float(parts[2])
-                vz_values.append(vz)
-            except:
-                pass
-
-    return np.array(vz_values)
+    return np.array(values)
 
 
 def perform_fft(signal, fs):

@@ -5,49 +5,49 @@ import serial
 from serial import SerialException
 
 
-# 串口配置
+# Serial port configuration
 class SerialConfig:
-    # 串口号
+    # Serial port name
     portName = ''
 
-    # 波特率
+    # Baud rate
     baud = 9600
 
 
-# 设备实例
+# Device instance
 class DeviceModel:
-    # region 属性
+    # region Properties
 
-    # 设备名称
-    deviceName = "我的设备"
+    # Device name
+    deviceName = "My Device"
 
-    # 设备modbus ID
+    # Device modbus ID
     ADDR = 0x50
 
-    # 设备数据字典
+    # Device data dictionary
     deviceData = {}
 
-    # 设备是否开启
+    # Whether the device is open
     isOpen = False
 
-    # 是否循环读取
+    # Whether loop reading is enabled
     loop = False
 
-    # 串口
+    # Serial port
     serialPort = None
 
-    # 串口配置
+    # Serial port configuration
     serialConfig = SerialConfig()
 
-    # 临时数组
+    # Temporary buffer
     TempBytes = []
 
-    # 起始寄存器
+    # Starting register
     statReg = None
 
     # endregion
 
-    # region   计算CRC
+    # region CRC calculation
     auchCRCHi = [
         0x00, 0xC1, 0x81, 0x40, 0x01, 0xC0, 0x80, 0x41, 0x01, 0xC0, 0x80, 0x41, 0x00, 0xC1, 0x81,
         0x40, 0x01, 0xC0, 0x80, 0x41, 0x00, 0xC1, 0x81, 0x40, 0x00, 0xC1, 0x81, 0x40, 0x01, 0xC0,
@@ -88,20 +88,20 @@ class DeviceModel:
         0x44, 0x84, 0x85, 0x45, 0x87, 0x47, 0x46, 0x86, 0x82, 0x42, 0x43, 0x83, 0x41, 0x81, 0x80,
         0x40]
 
-    # endregion  计算CRC
+    # endregion CRC calculation
 
     def __init__(self, deviceName, portName, baud, ADDR):
-        print("初始化设备模型")
-        # 设备名称（自定义）
+        print("Initializing device model")
+        # Device name (custom)
         self.deviceName = deviceName
-        # 串口号
+        # Serial port name
         self.serialConfig.portName = portName
-        # 串口波特率
+        # Serial baud rate
         self.serialConfig.baud = baud
-        # modbus 设备地址
+        # Modbus device address
         self.ADDR = ADDR
 
-    # 获得CRC校验
+    # Get CRC checksum
     def get_crc(self, datas, dlen):
         tempH = 0xff  # 高 CRC 字节初始化 High CRC byte initialization
         tempL = 0xff  # 低 CRC 字节初始化 Low CRC byte initialization
@@ -112,48 +112,48 @@ class DeviceModel:
         return (tempH << 8) | tempL
         pass
 
-    # region 获取设备数据
+    # region Get device data
 
-    # 设置设备数据
+    # Set device data
     def set(self, key, value):
-        # 将设备数据存到键值
+        # Store device data by key
         self.deviceData[key] = value
 
-    # 获得设备数据
+    # Get device data
     def get(self, key):
-        # 从键值中获取数据，没有则返回None
+        # Get data from the key, return None if it does not exist
         if key in self.deviceData:
             return self.deviceData[key]
         else:
             return None
 
-    # 删除设备数据
+    # Remove device data
     def remove(self, key):
-        # 删除设备键值
+        # Remove the device key/value
         del self.deviceData[key]
 
     # endregion
 
-    # 打开设备
+    # Open device
     def openDevice(self):
-        # 先关闭端口
+        # Close the port first
         self.closeDevice()
         try:
             self.serialPort = serial.Serial(self.serialConfig.portName, self.serialConfig.baud, timeout=0.5)
             self.isOpen = True
-            print("{}已打开".format(self.serialConfig.portName))
-            # 开启一个线程持续监听串口数据
+            print("{} is open".format(self.serialConfig.portName))
+            # Start a thread to continuously listen for serial data
             t = threading.Thread(target=self.readDataTh, args=("Data-Received-Thread", 10,))
             t.start()
-            print("设备打开成功")
+            print("Device opened successfully")
         except SerialException:
-            print("打开" + self.serialConfig.portName + "失败")
+            print("Failed to open " + self.serialConfig.portName)
 
-    # 监听串口数据线程
+    # Serial data listener thread
     def readDataTh(self, threadName, delay):
-        print("启动" + threadName)
+        print("Starting " + threadName)
         while True:
-            # 如果串口打开了
+            # If the serial port is open
             if self.isOpen:
                 try:
                     tLen = self.serialPort.inWaiting()
@@ -164,61 +164,61 @@ class DeviceModel:
                     print(ex)
             else:
                 time.sleep(0.1)
-                print("串口未打开")
+                print("Serial port is not open")
                 break
 
-    # 关闭设备
+    # Close device
     def closeDevice(self):
         if self.serialPort is not None:
             self.serialPort.close()
-            print("端口关闭了")
+            print("Port closed")
         self.isOpen = False
-        print("设备关闭了")
+        print("Device closed")
 
-    # region 数据解析
+    # region Data parsing
 
-    # 串口数据处理
+    # Handle serial data
     def onDataReceived(self, data):
         tempdata = bytes.fromhex(data.hex())
         for val in tempdata:
             self.TempBytes.append(val)
-            # 判断ID是否正确
+            # Check whether the ID is correct
             if self.TempBytes[0] != self.ADDR:
                 del self.TempBytes[0]
                 continue
-            # 判断是否是03读取功能码
+            # Check whether the function code is 03 (read)
             if len(self.TempBytes) > 2:
                 if not (self.TempBytes[1] == 0x03):
                     del self.TempBytes[0]
                     continue
                 tLen = len(self.TempBytes)
-                # 拿到一包完整协议数据
+                # Got a complete packet of protocol data
                 if tLen == self.TempBytes[2] + 5:
-                    # CRC校验
+                    # CRC validation
                     tempCrc = self.get_crc(self.TempBytes, tLen - 2)
                     if (tempCrc >> 8) == self.TempBytes[tLen - 2] and (tempCrc & 0xff) == self.TempBytes[tLen - 1]:
                         self.processData(self.TempBytes[2])
                     else:
                         del self.TempBytes[0]
 
-    # 数据解析
+    # Parse data
     def processData(self, length):
-        # 从读取指令中获得起始寄存器
+        # Get the starting register from the read command
         if self.statReg is not None:
             for i in range(int(length / 2)):
-                # 寄存器数据
+                # Register data
                 value = self.TempBytes[2 * i + 3] << 8 | self.TempBytes[2 * i + 4]
-                # 振动角度解析
+                # Vibration angle parsing
                 if 0x3D <= self.statReg <= 0x3F:
                     value = value / 32768 * 180
                     self.set(str(self.statReg), value)
                     self.statReg += 1
-                # 温度解析
+                # Temperature parsing
                 elif self.statReg == 0x40:
                     value = value / 100
                     self.set(str(self.statReg), value)
                     self.statReg += 1
-                # 其他
+                # Other values
                 else:
                     self.set(str(self.statReg), value)
                     self.statReg += 1
@@ -226,107 +226,107 @@ class DeviceModel:
 
     # endregion
 
-    # 发送串口数据
+    # Send serial data
     def sendData(self, data):
         try:
             self.serialPort.write(data)
         except Exception as ex:
             print(ex)
 
-    # 读取寄存器
+    # Read register
     def readReg(self, regAddr, regCount):
-        # 从指令中获取起始寄存器 （处理回传数据需要用到）
+        # Get the starting register from the command (used when processing returned data)
         self.statReg = regAddr
-        # 封装读取指令并向串口发送数据
+        # Build the read command and send it through the serial port
         self.sendData(self.get_readBytes(self.ADDR, regAddr, regCount))
 
-    # 写入寄存器
+    # Write register
     def writeReg(self, regAddr, sValue):
-        # 解锁
+        # Unlock
         self.unlock()
-        # 延迟100ms
+        # Delay 100 ms
         time.sleep(0.1)
-        # 封装写入指令并向串口发送数据
+        # Build the write command and send it through the serial port
         self.sendData(self.get_writeBytes(self.ADDR, regAddr, sValue))
-        # 延迟100ms
+        # Delay 100 ms
         time.sleep(0.1)
-        # 保存
+        # Save
         self.save()
 
-    # 发送读取指令封装
+    # Build read command
     def get_readBytes(self, devid, regAddr, regCount):
-        # 初始化
+        # Initialize
         tempBytes = [None] * 8
-        # 设备modbus地址
+        # Device Modbus address
         tempBytes[0] = devid
-        # 读取功能码
+        # Read function code
         tempBytes[1] = 0x03
-        # 寄存器高8位
+        # High 8 bits of the register address
         tempBytes[2] = regAddr >> 8
-        # 寄存器低8位
+        # Low 8 bits of the register address
         tempBytes[3] = regAddr & 0xff
-        # 读取寄存器个数高8位
+        # High 8 bits of the number of registers to read
         tempBytes[4] = regCount >> 8
-        # 读取寄存器个数低8位
+        # Low 8 bits of the number of registers to read
         tempBytes[5] = regCount & 0xff
-        # 获得CRC校验
+        # Get CRC checksum
         tempCrc = self.get_crc(tempBytes, len(tempBytes) - 2)
-        # CRC校验高8位
+        # High 8 bits of the CRC checksum
         tempBytes[6] = tempCrc >> 8
-        # CRC校验低8位
+        # Low 8 bits of the CRC checksum
         tempBytes[7] = tempCrc & 0xff
         return tempBytes
 
-    # 发送写入指令封装
+    # Build write command
     def get_writeBytes(self, devid, regAddr, sValue):
-        # 初始化
+        # Initialize
         tempBytes = [None] * 8
-        # 设备modbus地址
+        # Device Modbus address
         tempBytes[0] = devid
-        # 写入功能码
+        # Write function code
         tempBytes[1] = 0x06
-        # 寄存器高8位
+        # High 8 bits of the register address
         tempBytes[2] = regAddr >> 8
-        # 寄存器低8位
+        # Low 8 bits of the register address
         tempBytes[3] = regAddr & 0xff
-        # 寄存器值高8位
+        # High 8 bits of the register value
         tempBytes[4] = sValue >> 8
-        # 寄存器值低8位
+        # Low 8 bits of the register value
         tempBytes[5] = sValue & 0xff
-        # 获得CRC校验
+        # Get CRC checksum
         tempCrc = self.get_crc(tempBytes, len(tempBytes) - 2)
-        # CRC校验高8位
+        # High 8 bits of the CRC checksum
         tempBytes[6] = tempCrc >> 8
-        # CRC校验低8位
+        # Low 8 bits of the CRC checksum
         tempBytes[7] = tempCrc & 0xff
         return tempBytes
 
-    # 开始循环读取
+    # Start loop reading
     def startLoopRead(self):
-        # 循环读取控制
+        # Loop read control
         self.loop = True
-        # 开启读取线程
+        # Start the reading thread
         t = threading.Thread(target=self.loopRead, args=())  # 开启一个线程接收数据
         t.start()
 
-    # 循环读取线程
+    # Loop reading thread
     def loopRead(self):
-        print("循环读取开始")
+        print("Loop reading started")
         while self.loop:
             self.readReg(0x3A, 13)
             time.sleep(0.2)
-        print("循环读取结束")
+        print("Loop reading ended")
 
-    # 关闭循环读取
+    # Stop loop reading
     def stopLoopRead(self):
         self.loop = False
 
-    # 解锁
+    # Unlock
     def unlock(self):
         cmd = self.get_writeBytes(self.ADDR, 0x69, 0xb588)
         self.sendData(cmd)
 
-    # 保存
+    # Save
     def save(self):
         cmd = self.get_writeBytes(self.ADDR, 0x00, 0x0000)
         self.sendData(cmd)

@@ -1,279 +1,464 @@
-import sys
-import os
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'vb01_python_sdk'))
-
+import argparse
 import csv
-import time
+import os
+import sys
 import threading
+import time
 from collections import deque
 
 import numpy as np
 import serial
 from serial import SerialException
 
-from vb01_python_sdk.device_model import DeviceModel  # CRC helper only
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'vb01_python_sdk'))
+
+from vb01_python_sdk.device_model import DeviceModel
+
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-PORT          = '/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0'
-BAUD          = 115200
-MODBUS_ADDR   = 0x50
+DEFAULT_PORT = 'COM5' if os.name == 'nt' else '/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0'
+PORT = os.getenv('WTVB_PORT', DEFAULT_PORT)
 
-MAX_TIME_PTS  = int(60 * 150)   # 60-second rolling window @ 150 Hz
-SAMPLING_RATE = 150.0   # Hz
+# 115200 is strongly preferred for FFT logging. Fall back to 9600 for first-time setup.
+BAUD_CANDIDATES = [
+	int(part.strip())
+	for part in os.getenv('WTVB_BAUD_CANDIDATES', '115200,38400,9600').split(',')
+	if part.strip()
+]
+BAUD = BAUD_CANDIDATES[0]
+MODBUS_ADDR = int(os.getenv('WTVB_MODBUS_ADDR', '0x50'), 0)
+
+# Sensor register map
+REG_AZ = 0x36
+REG_VZ = 0x3C
+REG_TEMP = 0x40
+REG_HZZ = 0x46
+REG_RATE = 0x65
+REG_UNLOCK = 0x69
+
+# Read AZ..VZ in one request so FFT can use Z acceleration while time graph uses VZ.
+FAST_START_REG = REG_AZ
+FAST_REG_COUNT = 7
+
+SENSOR_RATE_HZ = int(float(os.getenv('WTVB_SENSOR_RATE_HZ', '150')))
+SAMPLING_RATE = float(SENSOR_RATE_HZ)
+MAX_TIME_PTS = int(max(600, 60 * SAMPLING_RATE))
+SERIAL_TIMEOUT = float(os.getenv('WTVB_SERIAL_TIMEOUT', '0.15'))
+AUTO_CONFIGURE_SENSOR_RATE = os.getenv('WTVB_SET_SENSOR_RATE', '0').lower() in {'1', 'true', 'yes', 'on'}
 
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
 
-# ---------------------------------------------------------------------------
-# Shared data buffers  (written by SerialReader thread, read by Dash callbacks)
-# ---------------------------------------------------------------------------
-vz_history  = deque(maxlen=MAX_TIME_PTS)
-hzz_history = deque(maxlen=MAX_TIME_PTS)
-ts_history  = deque(maxlen=MAX_TIME_PTS)
 
-_lock      = threading.Lock()
+# ---------------------------------------------------------------------------
+# Shared data buffers
+# ---------------------------------------------------------------------------
+_vz_history = deque(maxlen=MAX_TIME_PTS)
+_raw_vz_history = deque(maxlen=MAX_TIME_PTS)
+_raw_az_history = deque(maxlen=MAX_TIME_PTS)
+_hzz_history = deque(maxlen=MAX_TIME_PTS)
+_ts_history = deque(maxlen=MAX_TIME_PTS)
+
+_lock = threading.Lock()
 _connected = False
+
 
 # ---------------------------------------------------------------------------
 # Logging state
 # ---------------------------------------------------------------------------
-_log_active  = False
-_log_buffer  = []        # list of (counter, time_str, vz_mm_s)
+_log_active = False
+_log_buffer = []
 _log_counter = 0
-_log_lock    = threading.Lock()
+_log_lock = threading.Lock()
+
 
 # ---------------------------------------------------------------------------
-# Modbus RTU helpers
+# Modbus helpers
 # ---------------------------------------------------------------------------
 _crc_helper = DeviceModel.__new__(DeviceModel)
 
 
 def _build_read_request(addr: int, reg: int, count: int) -> bytes:
-    """Build a Modbus RTU Read-Holding-Registers (0x03) request frame."""
-    frame = [addr, 0x03, reg >> 8, reg & 0xFF, count >> 8, count & 0xFF, 0x00, 0x00]
-    crc = _crc_helper.get_crc(frame, 6)
-    frame[6] = crc >> 8
-    frame[7] = crc & 0xFF
-    return bytes(frame)
+	frame = [addr, 0x03, reg >> 8, reg & 0xFF, count >> 8, count & 0xFF, 0x00, 0x00]
+	crc = _crc_helper.get_crc(frame, 6)
+	frame[6] = (crc >> 8) & 0xFF
+	frame[7] = crc & 0xFF
+	return bytes(frame)
 
 
-def _parse_read_response(buf: bytes, start_reg: int, n_regs: int) -> dict:
-    """
-    Parse a Modbus RTU 0x03 response.
-    Returns dict of {register_address: raw_unsigned_16bit_value}.
-    Returns empty dict on CRC error or length mismatch.
-    """
-    expected = 5 + 2 * n_regs
-    if len(buf) < expected:
-        return {}
-    crc_calc = _crc_helper.get_crc(list(buf), len(buf) - 2)
-    crc_recv = (buf[-2] << 8) | buf[-1]
-    if crc_calc != crc_recv:
-        return {}
-    result = {}
-    for i in range(n_regs):
-        value = (buf[3 + 2 * i] << 8) | buf[4 + 2 * i]
-        result[start_reg + i] = value
-    return result
+def _build_write_request(addr: int, reg: int, value: int) -> bytes:
+	frame = [addr, 0x06, reg >> 8, reg & 0xFF, (value >> 8) & 0xFF, value & 0xFF, 0x00, 0x00]
+	crc = _crc_helper.get_crc(frame, 6)
+	frame[6] = (crc >> 8) & 0xFF
+	frame[7] = crc & 0xFF
+	return bytes(frame)
+
+
+def decode_vz_mm_s(raw_value: int) -> float:
+	return float(raw_value) / 100.0
+
+
+def decode_frequency_hz(raw_value: int) -> float:
+	return raw_value / 10.0
+
+
+def _extract_valid_frame(buffer: bytes, addr: int, function_code: int, byte_count: int) -> bytes:
+	expected_len = byte_count + 5
+	for index in range(0, max(0, len(buffer) - expected_len + 1)):
+		if buffer[index] != addr:
+			continue
+		if buffer[index + 1] != function_code:
+			continue
+		if buffer[index + 2] != byte_count:
+			continue
+		candidate = buffer[index:index + expected_len]
+		crc_calc = _crc_helper.get_crc(list(candidate), len(candidate) - 2)
+		crc_recv = (candidate[-2] << 8) | candidate[-1]
+		if crc_calc == crc_recv:
+			return candidate
+	return b''
+
+
+def _parse_read_response(buffer: bytes, start_reg: int, register_count: int) -> dict:
+	frame = _extract_valid_frame(buffer, MODBUS_ADDR, 0x03, 2 * register_count)
+	if not frame:
+		return {}
+
+	registers = {}
+	for offset in range(register_count):
+		raw_value = (frame[3 + 2 * offset] << 8) | frame[4 + 2 * offset]
+		registers[start_reg + offset] = raw_value
+	return registers
+
+
+def _send_and_read_exact(ser: serial.Serial, request: bytes, expected_len: int) -> bytes:
+	ser.reset_input_buffer()
+	ser.write(request)
+	ser.flush()
+	return ser.read(expected_len)
+
+
+def write_register(ser: serial.Serial, reg_addr: int, value: int) -> bool:
+	request = _build_write_request(MODBUS_ADDR, reg_addr, value)
+	response = _send_and_read_exact(ser, request, 8)
+	return response == request
+
+
+def set_sensor_sampling_rate(ser: serial.Serial, sample_rate_hz: int) -> bool:
+	if not write_register(ser, REG_UNLOCK, 0xB588):
+		return False
+	time.sleep(0.05)
+	if not write_register(ser, REG_RATE, int(sample_rate_hz)):
+		return False
+	time.sleep(0.05)
+	return write_register(ser, 0x00, 0x0000)
 
 
 # ---------------------------------------------------------------------------
-# Background serial reader thread
+# Background serial reader
 # ---------------------------------------------------------------------------
-
 class SerialReader(threading.Thread):
-    """
-    Polls the WTVB02-485 via synchronous Modbus RTU.
-    Reads registers 0x3C–0x46 in one request:
-      0x3C  VZ  — Z vibration velocity (mm/s, signed 16-bit)
-      0x44  HZX — X vibration frequency (Hz, unsigned, ÷10)
-      0x45  HZY — Y vibration frequency (Hz, unsigned, ÷10)
-      0x46  HZZ — Z vibration frequency (Hz, unsigned, ÷10)
-    """
+	def __init__(
+		self,
+		port: str = PORT,
+		baud_candidates=None,
+		sample_rate_hz: int = SENSOR_RATE_HZ,
+		auto_configure_sensor_rate: bool = AUTO_CONFIGURE_SENSOR_RATE,
+	):
+		super().__init__(daemon=True, name='SerialReader')
+		self.port = port
+		self.baud_candidates = list(baud_candidates or BAUD_CANDIDATES)
+		self.sample_rate_hz = int(sample_rate_hz)
+		self.auto_configure_sensor_rate = auto_configure_sensor_rate
+		self._stop_event = threading.Event()
+		self._pause_event = threading.Event()
+		self._pause_event.set()
+		self._last_hzz_hz = 0.0
+		self._current_baud = None
 
-    START_REG = 0x3C
-    N_REGS    = 11      # 0x3C … 0x46 inclusive
-    REG_VZ    = 0x3C
-    REG_HZZ   = 0x46
+	def _probe_device(self, ser: serial.Serial) -> bool:
+		request = _build_read_request(MODBUS_ADDR, FAST_START_REG, FAST_REG_COUNT)
+		response = _send_and_read_exact(ser, request, 5 + 2 * FAST_REG_COUNT)
+		registers = _parse_read_response(response, FAST_START_REG, FAST_REG_COUNT)
+		return REG_VZ in registers
 
-    def __init__(self, port: str = PORT, baud: int = BAUD):
-        super().__init__(daemon=True, name="SerialReader")
-        self.port        = port
-        self.baud        = baud
-        self._stop_event  = threading.Event()
-        self._pause_event = threading.Event()
-        self._pause_event.set()   # starts in running state
+	def _open_serial(self) -> serial.Serial:
+		last_error = None
+		for baud in self.baud_candidates:
+			try:
+				ser = serial.Serial(
+					self.port,
+					baudrate=baud,
+					timeout=SERIAL_TIMEOUT,
+					bytesize=8,
+					parity='N',
+					stopbits=1,
+				)
+				if self._probe_device(ser):
+					self._current_baud = baud
+					return ser
+				ser.close()
+			except SerialException as exc:
+				last_error = exc
+		raise last_error or SerialException(
+			f'Unable to communicate with sensor on {self.port} using bauds {self.baud_candidates}'
+		)
 
-    def run(self):
-        global _connected, _log_active, _log_buffer, _log_counter
-        request  = _build_read_request(MODBUS_ADDR, self.START_REG, self.N_REGS)
-        resp_len = 5 + 2 * self.N_REGS   # 7 bytes for 1 register
+	def run(self):
+		global _connected, _log_active, _log_buffer, _log_counter
 
-        try:
-            with serial.Serial(self.port, BAUD, timeout=1.0) as ser:
-                _connected = True
-                print(f"[SerialReader] Connected → {self.port}  @  {BAUD} baud")
+		fast_request = _build_read_request(MODBUS_ADDR, FAST_START_REG, FAST_REG_COUNT)
+		fast_resp_len = 5 + 2 * FAST_REG_COUNT
 
-                while not self._stop_event.is_set():
-                    self._pause_event.wait()  # blocks while paused for save
-                    t0 = time.time()
+		hzz_request = _build_read_request(MODBUS_ADDR, REG_HZZ, 1)
+		hzz_resp_len = 7
 
-                    ser.reset_input_buffer()
-                    ser.write(request)
-                    buf = ser.read(resp_len)
+		try:
+			with self._open_serial() as ser:
+				if self.auto_configure_sensor_rate:
+					ok = set_sensor_sampling_rate(ser, self.sample_rate_hz)
+					status = 'OK' if ok else 'FAILED'
+					print(f'[SerialReader] Set sensor rate to {self.sample_rate_hz} Hz: {status}')
 
-                    if len(buf) < resp_len:
-                        print(f"[SerialReader] Short read: got {len(buf)}/{resp_len} bytes")
-                        continue
+				_connected = True
+				print(f'[SerialReader] Connected -> {self.port} @ {self._current_baud} baud')
 
-                    regs = _parse_read_response(buf, self.START_REG, self.N_REGS)
-                    if not regs:
-                        print("[SerialReader] CRC error or bad response, retrying…")
-                        continue
+				cycle = 0
+				while not self._stop_event.is_set():
+					self._pause_event.wait()
+					loop_started_at = time.perf_counter()
 
-                    ts     = time.time()
-                    raw_vz = regs.get(self.REG_VZ, 0)
-                    if raw_vz > 32767:
-                        raw_vz -= 65536
-                    vz_mm_s = float(raw_vz) / 100.0
+					fast_response = _send_and_read_exact(ser, fast_request, fast_resp_len)
+					registers = _parse_read_response(fast_response, FAST_START_REG, FAST_REG_COUNT)
+					if not registers:
+						continue
 
-                    # Vibration frequency Z-axis (Hz, unsigned) — per datasheet: value ÷ 10
-                    hzz = float(regs.get(self.REG_HZZ, 0)) / 10.0
+					if cycle % 10 == 0:
+						hzz_response = _send_and_read_exact(ser, hzz_request, hzz_resp_len)
+						hzz_registers = _parse_read_response(hzz_response, REG_HZZ, 1)
+						if hzz_registers:
+							self._last_hzz_hz = decode_frequency_hz(hzz_registers[REG_HZZ])
 
-                    with _lock:
-                        vz_history.append(vz_mm_s)
-                        hzz_history.append(hzz)
-                        ts_history.append(ts)
+					ts = time.time()
+					raw_az = registers[REG_AZ]
+					raw_vz = registers[REG_VZ]
+					vz_mm_s = decode_vz_mm_s(raw_vz)
+					hzz_hz = self._last_hzz_hz
 
-                    with _log_lock:
-                        if _log_active:
-                            _log_counter += 1
-                            time_str = time.strftime('%d %b %Y  %H:%M:%S', time.localtime(ts))
-                            _log_buffer.append(
-                                (_log_counter, time_str, vz_mm_s)
-                            )
+					with _lock:
+						_raw_az_history.append(raw_az)
+						_raw_vz_history.append(raw_vz)
+						_vz_history.append(vz_mm_s)
+						_hzz_history.append(hzz_hz)
+						_ts_history.append(ts)
 
-                    print(f"vz={vz_mm_s:+8.4f} mm/s  hzz={hzz:6.1f} Hz      ", end='\r')
+					with _log_lock:
+						if _log_active:
+							_log_counter += 1
+							_log_buffer.append({
+								'counter': _log_counter,
+								'unix_time': ts,
+								'iso_time': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts)),
+								'raw_az_u16': raw_az,
+								'raw_vz_u16': raw_vz,
+								'vz_mm_s': vz_mm_s,
+								'hzz_hz': hzz_hz,
+							})
 
-                    elapsed    = time.time() - t0
-                    sleep_time = (1.0 / SAMPLING_RATE) - elapsed
-                    if sleep_time > 0:
-                        time.sleep(sleep_time)
+					print(
+						f'vz={vz_mm_s:8.3f} mm/s  hzz={hzz_hz:6.1f} Hz',
+						end='\r',
+					)
 
-        except SerialException as exc:
-            print(f"\n[SerialReader] Serial error: {exc}")
-        finally:
-            _connected = False
-            print("\n[SerialReader] Disconnected.")
+					cycle += 1
+					elapsed = time.perf_counter() - loop_started_at
+					sleep_time = (1.0 / self.sample_rate_hz) - elapsed
+					if sleep_time > 0:
+						time.sleep(sleep_time)
 
-    def pause(self):
-        """Suspend polling (call before a blocking save)."""
-        self._pause_event.clear()
+		except SerialException as exc:
+			print(f'\n[SerialReader] Serial error: {exc}')
+		finally:
+			_connected = False
+			print('\n[SerialReader] Disconnected.')
 
-    def resume(self):
-        """Resume polling after save completes."""
-        self._pause_event.set()
+	def pause(self):
+		self._pause_event.clear()
 
-    def stop(self):
-        self._stop_event.set()
+	def resume(self):
+		self._pause_event.set()
+
+	def stop(self):
+		self._stop_event.set()
+		self._pause_event.set()
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
-
 def get_histories() -> dict:
-    """Return thread-safe snapshots of history deques.
+	with _lock:
+		raw_az = list(_raw_az_history)
+		raw_vz = list(_raw_vz_history)
+		vz = list(_vz_history)
+		hzz = list(_hzz_history)
+		ts = list(_ts_history)
+	rel = [stamp - ts[0] for stamp in ts] if ts else []
+	return {'raw_az_u16': raw_az, 'raw_vz_u16': raw_vz, 'vz': vz, 'hzz': hzz, 'ts': ts, 'rel_s': rel}
 
-    Returns
-    -------
-    dict with keys:
-      'vz'   : list[float]  – VZ mm/s
-      'hzz'  : list[float]  – Z-axis vibration frequency (Hz)
-      'ts'   : list[float]  – Unix timestamps (seconds)
-      'rel_s': list[float]  – seconds since first sample (x-axis)
-    """
-    with _lock:
-        vz  = list(vz_history)
-        hzz = list(hzz_history)
-        ts  = list(ts_history)
-    rel = [t - ts[0] for t in ts] if ts else []
-    return {'vz': vz, 'hzz': hzz, 'ts': ts, 'rel_s': rel}
+
+def get_latest_sample() -> dict:
+	with _lock:
+		if not _ts_history:
+			return {}
+		return {
+			'vz_mm_s': _vz_history[-1],
+			'hzz_hz': _hzz_history[-1],
+			'unix_time': _ts_history[-1],
+		}
 
 
 def is_connected() -> bool:
-    """Return True when the serial reader is actively connected."""
-    return _connected
+	return _connected
 
 
 def start_logging() -> None:
-    """Begin buffering VZ samples for a log session."""
-    global _log_active, _log_buffer, _log_counter
-    with _log_lock:
-        _log_active  = True
-        _log_buffer  = []
-        _log_counter = 0
+	global _log_active, _log_buffer, _log_counter
+	with _log_lock:
+		_log_active = True
+		_log_buffer = []
+		_log_counter = 0
 
 
 def stop_logging() -> list:
-    """Stop buffering and return the collected samples."""
-    global _log_active
-    with _log_lock:
-        _log_active = False
-        data        = list(_log_buffer)
-    return data
+	global _log_active
+	with _log_lock:
+		_log_active = False
+		data = list(_log_buffer)
+	return data
 
 
 def save_log(rpm: int, load_w: int, data: list) -> str:
-    """
-    Write *data* to a timestamped CSV in LOG_DIR.
+	os.makedirs(LOG_DIR, exist_ok=True)
+	timestamp = time.strftime('%Y%m%d_%H%M%S')
+	filename = f'vibration_RPM{rpm}_LOAD{load_w}W_{timestamp}.csv'
+	filepath = os.path.join(LOG_DIR, filename)
 
-    File name: vibration_RPM{rpm}_LOAD{load_w}W_{YYYYmmdd_HHMMSS}.csv
+	vz_vals = [row['vz_mm_s'] for row in data] if data else []
+	timestamps = [row['unix_time'] for row in data] if data else []
+	vz_rms = float(np.sqrt(np.mean(np.square(vz_vals)))) if vz_vals else 0.0
+	effective_rate_hz = SAMPLING_RATE
+	if len(timestamps) >= 2:
+		intervals = np.diff(np.array(timestamps, dtype=float))
+		median_dt = float(np.median(intervals)) if len(intervals) else 0.0
+		if median_dt > 0:
+			effective_rate_hz = 1.0 / median_dt
 
-    File content:
-      - Metadata header rows (RPM, Load, Timestamp, Samples, RMS)
-      - Data rows: counter, time, vz_mm_s
+	with open(filepath, 'w', newline='') as handle:
+		writer = csv.writer(handle)
+		writer.writerow(['# Engine Vibration Log'])
+		writer.writerow(['# RPM', rpm])
+		writer.writerow(['# Load (W)', load_w])
+		writer.writerow(['# Timestamp', timestamp])
+		writer.writerow(['# Samples', len(data)])
+		writer.writerow(['# Sensor Rate (Hz)', SENSOR_RATE_HZ])
+		writer.writerow(['# Effective Poll Rate (Hz)', f'{effective_rate_hz:.6f}'])
+		writer.writerow(['# VZ RMS (mm/s)', f'{vz_rms:.6f}'])
+		writer.writerow([])
+		writer.writerow([
+			'counter',
+			'unix_time',
+			'iso_time',
+			'vz_mm_s',
+			'hzz_hz',
+			'raw_vz_u16',
+		])
+		for row in data:
+			writer.writerow([
+				row['counter'],
+				f"{row['unix_time']:.6f}",
+				row['iso_time'],
+				f"{row['vz_mm_s']:.6f}",
+				f"{row['hzz_hz']:.6f}",
+				row['raw_vz_u16'],
+			])
 
-    Returns the absolute path of the saved file.
-    """
-    os.makedirs(LOG_DIR, exist_ok=True)
-    timestamp = time.strftime('%Y%m%d_%H%M%S')
-    filename  = f'vibration_RPM{rpm}_LOAD{load_w}W_{timestamp}.csv'
-    filepath  = os.path.join(LOG_DIR, filename)
-
-    vz_vals = [row[2] for row in data] if data else []
-    rms     = float(np.sqrt(np.mean(np.array(vz_vals) ** 2))) if vz_vals else 0.0
-
-    with open(filepath, 'w', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow(['# Engine Vibration Log'])
-        writer.writerow(['# RPM',        rpm])
-        writer.writerow(['# Load (W)',   load_w])
-        writer.writerow(['# Timestamp',  timestamp])
-        writer.writerow(['# Samples',    len(data)])
-        writer.writerow(['# RMS (mm/s)', f'{rms:.6f}'])
-        writer.writerow([])
-        writer.writerow(['counter', 'time', 'vz_mm_s'])
-        for entry in data:
-            writer.writerow([entry[0], entry[1], f'{entry[2]:.6f}'])
-
-    print(f"[Logger] Saved → {filepath}  ({len(data)} samples, RMS={rms:.4f} mm/s)")
-    return filepath
+	print(
+		f'[Logger] Saved -> {filepath} '
+		f'({len(data)} samples, VZ RMS={vz_rms:.4f} mm/s)'
+	)
+	return filepath
 
 
 # ---------------------------------------------------------------------------
 # Stand-alone mode
 # ---------------------------------------------------------------------------
+def main():
+	global SENSOR_RATE_HZ, SAMPLING_RATE
+
+	parser = argparse.ArgumentParser(
+		description='Read WTVB02/WTVB01 sensor data using unsigned VZ only for FFT logging.'
+	)
+	parser.add_argument('--port', default=PORT, help='Serial port, for example COM6')
+	parser.add_argument(
+		'--baud',
+		type=int,
+		nargs='*',
+		default=BAUD_CANDIDATES,
+		help='Baud candidates to try, highest first. Example: --baud 115200 9600',
+	)
+	parser.add_argument('--duration', type=float, default=0.0, help='Run duration in seconds. 0 means forever.')
+	parser.add_argument('--rpm', type=int, default=0, help='RPM metadata for saved logs')
+	parser.add_argument('--load', type=int, default=0, help='Load metadata in watts for saved logs')
+	parser.add_argument('--log', action='store_true', help='Save a CSV log when the run finishes')
+	parser.add_argument(
+		'--set-rate',
+		type=int,
+		default=None,
+		help='Write the sensor sampling-rate register before streaming. Example: --set-rate 150',
+	)
+	args = parser.parse_args()
+
+	if args.set_rate is not None:
+		SENSOR_RATE_HZ = int(args.set_rate)
+		SAMPLING_RATE = float(args.set_rate)
+
+	reader = SerialReader(
+		port=args.port,
+		baud_candidates=args.baud,
+		sample_rate_hz=args.set_rate or SENSOR_RATE_HZ,
+		auto_configure_sensor_rate=args.set_rate is not None,
+	)
+
+	if args.log:
+		start_logging()
+
+	reader.start()
+	started_at = time.time()
+	print('Collecting sensor data. Press Ctrl+C to stop.')
+
+	try:
+		while True:
+			if args.duration > 0 and (time.time() - started_at) >= args.duration:
+				break
+			latest = get_latest_sample()
+			if latest:
+				print(
+					f"latest -> vz={latest['vz_mm_s']:+.3f} mm/s, "
+					f"hzz={latest['hzz_hz']:.1f} Hz"
+				)
+			time.sleep(0.5)
+	except KeyboardInterrupt:
+		pass
+	finally:
+		reader.stop()
+		reader.join(timeout=2.0)
+
+	if args.log:
+		data = stop_logging()
+		save_log(args.rpm, args.load, data)
+
 
 if __name__ == '__main__':
-    reader = SerialReader()
-    reader.start()
-    print("Collecting… (Ctrl-C to stop)")
-    try:
-        while True:
-            time.sleep(1.0)
-    except KeyboardInterrupt:
-        pass
-    reader.stop()
-    reader.join(timeout=2)
+	main()
