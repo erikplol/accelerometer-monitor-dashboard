@@ -99,9 +99,9 @@ _reader.start()
 
 # ── GPIO traffic lights ───────────────────────────────────────────────────────
 if _GPIO_AVAILABLE:
-    led_red = LED(17)
-    led_yellow = LED(27)
-    led_green = LED(22)
+    led_red = LED(17, active_high=False)
+    led_yellow = LED(27, active_high=False)
+    led_green = LED(22, active_high=False)
 else:
     led_red = led_yellow = led_green = None
 
@@ -710,4 +710,4 @@ def handle_logging(n_start, n_stop, n_intervals, rpm, load_w, log_data):
 
 
 if __name__ == '__main__':
-    app.run(debug=True, dev_tools_ui=False, use_reloader=False, host='0.0.0.0', port=7777)
+    app.run(debug=True, dev_tools_ui=False, use_reloader=False, host='0.0.0.0', port=7770)
