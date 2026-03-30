@@ -7,6 +7,13 @@ from collections import deque
 
 import numpy as np
 
+try:
+    from gpiozero import LED
+    _GPIO_AVAILABLE = True
+except (ImportError, RuntimeError):
+    LED = None
+    _GPIO_AVAILABLE = False
+
 from pymavlink import mavutil
 
 # ---------------------------------------------------------------------------
@@ -22,6 +29,36 @@ SAMPLING_RATE = float(TARGET_IMU_RATE_HZ)
 MAX_TIME_PTS = int(max(600, 60 * SAMPLING_RATE))
 
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+
+# Thresholds for velocity RMS (mm/s) - ISO 10816 based
+THRESH_GREEN  = 2.8    # below  → green  (good)
+THRESH_YELLOW = 7.1    # below  → yellow (acceptable), above → red (alarm)
+
+# ---------------------------------------------------------------------------
+# GPIO Traffic Lights
+# ---------------------------------------------------------------------------
+if _GPIO_AVAILABLE:
+    led_red = LED(17, active_high=False)
+    led_yellow = LED(27, active_high=False)
+    led_green = LED(22, active_high=False)
+else:
+    led_red = led_yellow = led_green = None
+
+def _set_gpio_lights(red: bool, yellow: bool, green: bool) -> None:
+    if not _GPIO_AVAILABLE:
+        return
+    if red:
+        led_red.on()
+    else:
+        led_red.off()
+    if yellow:
+        led_yellow.on()
+    else:
+        led_yellow.off()
+    if green:
+        led_green.on()
+    else:
+        led_green.off()
 
 # ArduPilot RAW_IMU sends mG (milli-G) for xacc/yacc/zacc
 MG_TO_MS2 = 9.80665 / 1000.0
@@ -276,6 +313,23 @@ class MAVLinkReader(threading.Thread):
                         _az_ms2_history.append(az_ms2)
                         _vz_mms_history.append(vz_mms)
                         _ts_history.append(ts)
+                        
+                        # Evaluate GPIO traffic lights every 25 samples (~0.25s at 100Hz)
+                        if self._msg_count % 25 == 0:
+                            n_1s = max(1, int(self.target_rate_hz))
+                            if len(_vz_mms_history) >= n_1s:
+                                # Convert deque to list/array to calculate RMS
+                                # Take the last 1 second of data
+                                recent_vz = list(_vz_mms_history)[-n_1s:]
+                                rms = float(np.sqrt(np.mean(np.array(recent_vz) ** 2)))
+                                
+                                is_red    = rms >= THRESH_YELLOW
+                                is_yellow = THRESH_GREEN <= rms < THRESH_YELLOW
+                                is_green  = rms < THRESH_GREEN
+                            else:
+                                is_red, is_yellow, is_green = False, False, False
+                            
+                            _set_gpio_lights(is_red, is_yellow, is_green)
 
                     with _log_lock:
                         if _log_active:

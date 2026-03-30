@@ -5,13 +5,6 @@ from dash import dcc, html, Input, Output, State, ctx
 import plotly.graph_objs as go
 import numpy as np
 
-try:
-    from gpiozero import LED
-    _GPIO_AVAILABLE = True
-except (ImportError, RuntimeError):
-    LED = None
-    _GPIO_AVAILABLE = False
-
 from data_collect import (
     MAVLinkReader,
     get_histories,
@@ -21,6 +14,8 @@ from data_collect import (
     stop_logging,
     save_log,
     SAMPLING_RATE as DC_SAMPLING_RATE,
+    THRESH_GREEN,
+    THRESH_YELLOW,
 )
 
 # ── App setup ─────────────────────────────────────────────────────────────────
@@ -90,40 +85,8 @@ _fft_cache_x = []
 _fft_cache_y = []
 _fft_cache_signature = None
 
-# Thresholds for velocity RMS (mm/s) - ISO 10816 based
-THRESH_GREEN  = 2.8    # below  → green  (good)
-THRESH_YELLOW = 7.1    # below  → yellow (acceptable), above → red (alarm)
-
 _reader = MAVLinkReader()
 _reader.start()
-
-# ── GPIO traffic lights ───────────────────────────────────────────────────────
-if _GPIO_AVAILABLE:
-    led_red = LED(17, active_high=False)
-    led_yellow = LED(27, active_high=False)
-    led_green = LED(22, active_high=False)
-else:
-    led_red = led_yellow = led_green = None
-
-
-def _set_gpio_lights(red: bool, yellow: bool, green: bool) -> None:
-    if not _GPIO_AVAILABLE:
-        return
-    
-    if red:
-        led_red.on()
-    else:
-        led_red.off()
-        
-    if yellow:
-        led_yellow.on()
-    else:
-        led_yellow.off()
-        
-    if green:
-        led_green.on()
-    else:
-        led_green.off()
 
 # ── Style helpers ─────────────────────────────────────────────────────────────
 _BG        = '#0f1117'
@@ -520,8 +483,6 @@ def update_dashboard(n):
     is_red    = rms >= THRESH_YELLOW
     is_yellow = THRESH_GREEN <= rms < THRESH_YELLOW
     is_green  = rms < THRESH_GREEN
-
-    _set_gpio_lights(is_red, is_yellow, is_green)
 
     style_red    = _light_style(is_red,    '#f85149', 'rgba(248,81,73,0.55)')
     style_yellow = _light_style(is_yellow, '#d29922', 'rgba(210,153,34,0.55)')
