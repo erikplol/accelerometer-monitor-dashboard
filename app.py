@@ -6,12 +6,10 @@ import plotly.graph_objs as go
 import numpy as np
 
 try:
-    import RPi.GPIO as GPIO
-    GPIO.setmode(GPIO.BCM)
-    GPIO.setwarnings(False)
+    from gpiozero import LED
     _GPIO_AVAILABLE = True
 except (ImportError, RuntimeError):
-    GPIO = None
+    LED = None
     _GPIO_AVAILABLE = False
 
 from data_collect import (
@@ -100,21 +98,32 @@ _reader = MAVLinkReader()
 _reader.start()
 
 # ── GPIO traffic lights ───────────────────────────────────────────────────────
-GPIO_RED    = 17
-GPIO_YELLOW = 27
-GPIO_GREEN  = 22
-
 if _GPIO_AVAILABLE:
-    for _pin in (GPIO_RED, GPIO_YELLOW, GPIO_GREEN):
-        GPIO.setup(_pin, GPIO.OUT, initial=GPIO.LOW)
+    led_red = LED(17)
+    led_yellow = LED(27)
+    led_green = LED(22)
+else:
+    led_red = led_yellow = led_green = None
 
 
 def _set_gpio_lights(red: bool, yellow: bool, green: bool) -> None:
     if not _GPIO_AVAILABLE:
         return
-    GPIO.output(GPIO_RED,    GPIO.HIGH if red    else GPIO.LOW)
-    GPIO.output(GPIO_YELLOW, GPIO.HIGH if yellow else GPIO.LOW)
-    GPIO.output(GPIO_GREEN,  GPIO.HIGH if green  else GPIO.LOW)
+    
+    if red:
+        led_red.on()
+    else:
+        led_red.off()
+        
+    if yellow:
+        led_yellow.on()
+    else:
+        led_yellow.off()
+        
+    if green:
+        led_green.on()
+    else:
+        led_green.off()
 
 # ── Style helpers ─────────────────────────────────────────────────────────────
 _BG        = '#0f1117'
