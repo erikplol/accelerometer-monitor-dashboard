@@ -15,8 +15,9 @@ except (ImportError, RuntimeError):
     _GPIO_AVAILABLE = False
 
 from data_collect import (
-    SerialReader,
+    MAVLinkReader,
     get_histories,
+    get_actual_rate,
     is_connected,
     start_logging,
     stop_logging,
@@ -91,11 +92,11 @@ _fft_cache_x = []
 _fft_cache_y = []
 _fft_cache_signature = None
 
-# Thresholds for the currently displayed VZ RMS signal
+# Thresholds for velocity RMS (mm/s) - ISO 10816 based
 THRESH_GREEN  = 2.8    # below  → green  (good)
 THRESH_YELLOW = 7.1    # below  → yellow (acceptable), above → red (alarm)
 
-_reader = SerialReader()
+_reader = MAVLinkReader()
 _reader.start()
 
 # ── GPIO traffic lights ───────────────────────────────────────────────────────
@@ -199,7 +200,7 @@ app.layout = html.Div([
     # ── Top strip: RMS | Freq | Severity | Logging ─────────────────────
     html.Div([
 
-        # RMS card
+        # RMS card (Velocity from integrated acceleration)
         html.Div([
             html.Div("RMS VZ", style={**_LABEL, 'textAlign': 'center'}),
             html.Div([
@@ -235,6 +236,25 @@ app.layout = html.Div([
         ], style={**_CARD, 'flex': '0 0 160px', 'alignSelf': 'stretch',
                   'display': 'flex', 'flexDirection': 'column', 'justifyContent': 'center', 'alignItems': 'center',
                   'borderTop': '2px solid #3fb950'},
+           className='card-narrow'),
+
+        # FFT Sum card
+        html.Div([
+            html.Div("FFT Sum", style={**_LABEL, 'textAlign': 'center'}),
+            html.Div([
+                html.Span(id='fft-sum', children='—', style={
+                    'color': '#d29922',
+                    'fontSize': '2.8rem', 'fontWeight': 300, 'lineHeight': 1,
+                    'fontVariantNumeric': 'tabular-nums',
+                }),
+                html.Span(" mm/s", style={
+                    'color': '#6e7681', 'fontSize': '0.9rem',
+                    'marginLeft': 5, 'alignSelf': 'flex-end', 'paddingBottom': 3,
+                }),
+            ], style={'display': 'flex', 'alignItems': 'baseline', 'justifyContent': 'center'}),
+        ], style={**_CARD, 'flex': '0 0 160px', 'alignSelf': 'stretch',
+                  'display': 'flex', 'flexDirection': 'column', 'justifyContent': 'center', 'alignItems': 'center',
+                  'borderTop': '2px solid #d29922'},
            className='card-narrow'),
 
         # Traffic-light card
@@ -428,6 +448,7 @@ _YAXIS_VEL = dict(
      Output('fft-graph',     'figure'),
      Output('rms-value',     'children'),
      Output('recv-hz',       'children'),
+     Output('fft-sum',       'children'),
      Output('light-red',     'style'),
      Output('light-yellow',  'style'),
      Output('light-green',   'style'),
@@ -439,19 +460,16 @@ def update_dashboard(n):
     global _fft_cache_x, _fft_cache_y, _fft_cache_signature
 
     h      = get_histories()
-    raw_az_all = h.get('raw_az_u16', [])
-    raw_vz_all = h.get('raw_vz_u16', [])
-    vz_all  = h['vz']
+    vz_all  = h.get('vz', [])             # Z velocity in mm/s (integrated)
     rel_all = h['rel_s']
-    hzz    = h['hzz']
 
     # Downsample for display — keeps the browser responsive
     if len(vz_all) > MAX_DISPLAY_PTS:
         step = len(vz_all) // MAX_DISPLAY_PTS
-        vz  = vz_all[::step]
+        vz_display = vz_all[::step]
         rel = rel_all[::step]
     else:
-        vz  = vz_all
+        vz_display = vz_all
         rel = rel_all
 
     VZ_COLOR    = '#58a6ff'
@@ -460,24 +478,34 @@ def update_dashboard(n):
 
     # ── Connection ──────────────────────────────────────────────────────
     connected  = is_connected()
-    conn_label = '● Connected' if connected else '● Disconnected'
+    actual_rate = get_actual_rate()
+    if connected:
+        conn_label = f'● Connected @ {actual_rate:.1f} Hz'
+    else:
+        conn_label = '● Disconnected'
     conn_style = OK_STYLE if connected else EMPTY_STYLE
 
-    # ── RMS over last 1 second ─────────────────────────────────────────
-    n_1s   = max(1, int(SAMPLING_RATE))
-    window = vz_all[-n_1s:] if vz_all else []
-    if window:
-        rms       = float(np.sqrt(np.mean(np.array(window) ** 2)))
-        rms_label = f"{rms:.3f}"
+    # ── Velocity RMS over last 1 second (mm/s) ─────────────────────────────
+    n_1s = max(1, int(SAMPLING_RATE))
+    vz_window = vz_all[-n_1s:] if vz_all else []
+    if vz_window:
+        rms = float(np.sqrt(np.mean(np.array(vz_window) ** 2)))
+        rms_label = f"{rms:.2f}"
     else:
-        rms       = 0.0
+        rms = 0.0
         rms_label = "—"
 
-    # ── Actual vibration frequency from sensor (reg 0x46) ────────────────────
-    if hzz:
-        hz_label = f"{hzz[-1]:.1f}"
-    else:
-        hz_label  = "—"
+    # ── Dominant frequency from FFT peak ────────────────────────────────
+    # Calculate from cached FFT data instead of sensor register
+    dominant_hz = 0.0
+    fft_sum = 0.0
+    if _fft_cache_x and _fft_cache_y:
+        peak_idx = int(np.argmax(_fft_cache_y))
+        if peak_idx < len(_fft_cache_x):
+            dominant_hz = _fft_cache_x[peak_idx]
+        fft_sum = sum(_fft_cache_y)
+    hz_label = f"{dominant_hz:.1f}" if dominant_hz > 0 else "—"
+    fft_sum_label = f"{fft_sum:.2f}" if fft_sum > 0 else "—"
 
     # ── Traffic light ──────────────────────────────────────────────────
     is_red    = rms >= THRESH_YELLOW
@@ -497,15 +525,19 @@ def update_dashboard(n):
         tickfont=dict(size=10),
     )
     _yaxis_v = go.layout.YAxis(
-        **_YAXIS_VEL,
+        gridcolor=_GRID_CLR, color=_TICK_CLR, zeroline=True,
+        zerolinecolor=_ZERO_CLR, zerolinewidth=1,
+        title=dict(text='mm/s', font=dict(size=10, color=_TICK_CLR)),
+        tickfont=dict(size=10),
+        showgrid=True,
     )
     time_fig = go.Figure(
         data=[
             go.Scattergl(
-                x=rel, y=vz,
+                x=rel, y=vz_display,
                 mode='lines', line=dict(color=VZ_COLOR, width=1.5),
                 name='VZ',
-                hovertemplate='%{y:.4f} mm/s<extra></extra>',
+                hovertemplate='%{y:.2f} mm/s<extra></extra>',
             )
         ],
         layout=go.Layout(
@@ -520,28 +552,26 @@ def update_dashboard(n):
         ),
     )
 
-    # ── Graph 2: FFT ──────────────────────────────────────────────────────
+    # ── Graph 2: FFT (velocity spectrum in mm/s) ─────────────────────────
 
     fft_traces = []
     fft_shapes = []
 
-    n_fft_window = max(64, int(SAMPLING_RATE * FFT_WINDOW_SECONDS))
+    # Use actual sampling rate for correct frequency calculation
+    effective_rate = actual_rate if actual_rate > 0 else SAMPLING_RATE
+    n_fft_window = max(64, int(effective_rate * FFT_WINDOW_SECONDS))
     should_update_fft = (n % FFT_UPDATE_EVERY_N_INTERVALS == 0)
-    if len(raw_az_all) >= n_fft_window and should_update_fft:
-        # FFT uses Z-axis acceleration amplitude in g.
-        # Reinterpret unsigned 16-bit raw data as signed two's-complement,
-        # then scale using the datasheet formula: AZ = raw/32768 * 16 g.
+    if len(vz_all) >= n_fft_window and should_update_fft:
+        # FFT uses Z-axis velocity in mm/s
         N = n_fft_window
-        raw_segment = np.array(raw_az_all[-N:], dtype=np.int32)
-        signed_segment = np.where(raw_segment >= 32768, raw_segment - 65536, raw_segment)
-        segment = signed_segment.astype(float) / 32768.0 * 16.0
+        segment = np.array(vz_all[-N:], dtype=float)
         segment = segment - segment.mean()
 
         window        = np.hanning(N)
         coherent_gain = float(window.mean()) if N > 0 else 1.0
         spectrum      = np.fft.rfft(segment * window)
         fft_vals      = np.abs(spectrum) / (N * coherent_gain)
-        freqs         = np.fft.rfftfreq(N, d=1.0 / SAMPLING_RATE)
+        freqs         = np.fft.rfftfreq(N, d=1.0 / effective_rate)  # Use actual rate
 
         if len(fft_vals) > 2:
             fft_vals[1:-1] *= 2.0
@@ -552,7 +582,7 @@ def update_dashboard(n):
 
         _fft_cache_x = freqs.tolist()
         _fft_cache_y = fft_vals.tolist()
-        _fft_cache_signature = (len(raw_az_all), raw_az_all[-1], N)
+        _fft_cache_signature = (len(vz_all), vz_all[-1], N)
 
     if _fft_cache_signature is not None and _fft_cache_x:
         fft_traces.append(go.Scattergl(
@@ -561,11 +591,10 @@ def update_dashboard(n):
             line=dict(color=VZ_COLOR, width=1.5),
             fillcolor='rgba(88,166,255,0.15)',
             name='FFT',
-            hovertemplate='%{x:.2f} Hz  %{y:.5f} g<extra></extra>',
+            hovertemplate='%{x:.2f} Hz  %{y:.3f} mm/s<extra></extra>',
         ))
 
-    sensor_hz = hzz[-1] if hzz else None
-    x_max     = max(SAMPLING_RATE / 2.0, (sensor_hz or 0) * 1.2, 5.0)
+    x_max = max(effective_rate / 2.0, (dominant_hz or 0) * 1.2, 5.0)
 
     fft_fig = go.Figure(
         data=fft_traces,
@@ -586,7 +615,7 @@ def update_dashboard(n):
             yaxis=go.layout.YAxis(
                 **{
                     **_YAXIS_VEL,
-                    'title': dict(text='g', font=dict(size=10, color=_TICK_CLR)),
+                    'title': dict(text='mm/s', font=dict(size=10, color=_TICK_CLR)),
                     'rangemode': 'nonnegative',
                 },
             ),
@@ -596,7 +625,7 @@ def update_dashboard(n):
     )
 
     return (
-        time_fig, fft_fig, rms_label, hz_label,
+        time_fig, fft_fig, rms_label, hz_label, fft_sum_label,
         style_red, style_yellow, style_green,
         conn_label, conn_style,
     )
