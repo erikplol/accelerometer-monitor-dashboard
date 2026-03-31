@@ -31,21 +31,48 @@ BAUD = BAUD_CANDIDATES[0]
 MODBUS_ADDR = int(os.getenv('WTVB_MODBUS_ADDR', '0x50'), 0)
 
 # Sensor register map
+REG_AX = 0x34
+REG_AY = 0x35
 REG_AZ = 0x36
+REG_VX = 0x3A
+REG_VY = 0x3B
 REG_VZ = 0x3C
+REG_DX = 0x41
+REG_DY = 0x42
+REG_DZ = 0x43
+REG_HDX = 0x47
+REG_HDY = 0x48
+REG_HDZ = 0x49
 REG_TEMP = 0x40
 REG_HZZ = 0x46
 REG_RATE = 0x65
 REG_UNLOCK = 0x69
 
-# Read AZ..VZ in one request so FFT can use Z acceleration while time graph uses VZ.
+FULL_START_REG = REG_AX
+FULL_REG_COUNT = (REG_HDZ - REG_AX) + 1  # 0x34..0x49 inclusive
+REGISTER_LABELS = {
+	REG_AX: 'acc_x',
+	REG_AY: 'acc_y',
+	REG_AZ: 'acc_z',
+	REG_VX: 'vel_x',
+	REG_VY: 'vel_y',
+	REG_VZ: 'vel_z',
+	REG_DX: 'disp_x',
+	REG_DY: 'disp_y',
+	REG_DZ: 'disp_z',
+	REG_HDX: 'hi_disp_x',
+	REG_HDY: 'hi_disp_y',
+	REG_HDZ: 'hi_disp_z',
+}
+
+# Read AZ..VZ block; we still use only VZ, but this block read is reliable on this device
 FAST_START_REG = REG_AZ
 FAST_REG_COUNT = 7
 
 SENSOR_RATE_HZ = int(float(os.getenv('WTVB_SENSOR_RATE_HZ', '150')))
 SAMPLING_RATE = float(SENSOR_RATE_HZ)
 MAX_TIME_PTS = int(max(600, 60 * SAMPLING_RATE))
-SERIAL_TIMEOUT = float(os.getenv('WTVB_SERIAL_TIMEOUT', '0.15'))
+SERIAL_TIMEOUT = float(os.getenv('WTVB_SERIAL_TIMEOUT', '0.03'))
 AUTO_CONFIGURE_SENSOR_RATE = os.getenv('WTVB_SET_SENSOR_RATE', '0').lower() in {'1', 'true', 'yes', 'on'}
 
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
@@ -57,6 +84,7 @@ LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
 _vz_history = deque(maxlen=MAX_TIME_PTS)
 _raw_vz_history = deque(maxlen=MAX_TIME_PTS)
 _raw_az_history = deque(maxlen=MAX_TIME_PTS)
+_latest_full_registers = {}
 _hzz_history = deque(maxlen=MAX_TIME_PTS)
 _ts_history = deque(maxlen=MAX_TIME_PTS)
 
@@ -101,6 +129,20 @@ def decode_vz_mm_s(raw_value: int) -> float:
 
 def decode_frequency_hz(raw_value: int) -> float:
 	return raw_value / 10.0
+
+
+def _to_int16(raw_value: int) -> int:
+	"""Convert unsigned register word to signed 16-bit."""
+	return raw_value - 0x10000 if raw_value & 0x8000 else raw_value
+
+
+def _decode_registers(registers: dict) -> dict:
+	decoded = {}
+	for reg, value in registers.items():
+		name = REGISTER_LABELS.get(reg, f'reg_0x{reg:02X}')
+		signed_val = _to_int16(value)
+		decoded[f'reg_{name}'] = signed_val
+	return decoded
 
 
 def _extract_valid_frame(buffer: bytes, addr: int, function_code: int, byte_count: int) -> bytes:
@@ -165,16 +207,19 @@ class SerialReader(threading.Thread):
 		baud_candidates=None,
 		sample_rate_hz: int = SENSOR_RATE_HZ,
 		auto_configure_sensor_rate: bool = AUTO_CONFIGURE_SENSOR_RATE,
+		read_full_registers: bool = False,
 	):
 		super().__init__(daemon=True, name='SerialReader')
 		self.port = port
 		self.baud_candidates = list(baud_candidates or BAUD_CANDIDATES)
 		self.sample_rate_hz = int(sample_rate_hz)
 		self.auto_configure_sensor_rate = auto_configure_sensor_rate
+		self.read_full_registers = read_full_registers
 		self._stop_event = threading.Event()
 		self._pause_event = threading.Event()
 		self._pause_event.set()
 		self._last_hzz_hz = 0.0
+		self._hzz_poll_every = 50  # poll HZZ less often to reduce bus load
 		self._current_baud = None
 
 	def _probe_device(self, ser: serial.Serial) -> bool:
@@ -206,13 +251,19 @@ class SerialReader(threading.Thread):
 		)
 
 	def run(self):
-		global _connected, _log_active, _log_buffer, _log_counter
+		global _connected, _log_active, _log_buffer, _log_counter, _latest_full_registers
 
 		fast_request = _build_read_request(MODBUS_ADDR, FAST_START_REG, FAST_REG_COUNT)
 		fast_resp_len = 5 + 2 * FAST_REG_COUNT
 
 		hzz_request = _build_read_request(MODBUS_ADDR, REG_HZZ, 1)
 		hzz_resp_len = 7
+
+		full_request = None
+		full_resp_len = 0
+		if self.read_full_registers:
+			full_request = _build_read_request(MODBUS_ADDR, FULL_START_REG, FULL_REG_COUNT)
+			full_resp_len = 5 + 2 * FULL_REG_COUNT
 
 		try:
 			with self._open_serial() as ser:
@@ -234,37 +285,52 @@ class SerialReader(threading.Thread):
 					if not registers:
 						continue
 
-					if cycle % 10 == 0:
+					# VZ is unsigned per spec
+					raw_vz_u16 = registers[REG_VZ]
+					vz_unsigned = decode_vz_mm_s(raw_vz_u16)
+
+					full_registers = {}
+					decoded_registers = {}
+					if self.read_full_registers and full_request:
+						full_response = _send_and_read_exact(ser, full_request, full_resp_len)
+						full_registers = _parse_read_response(full_response, FULL_START_REG, FULL_REG_COUNT)
+						if full_registers:
+							decoded_registers = _decode_registers(full_registers)
+
+					if cycle % self._hzz_poll_every == 0:
 						hzz_response = _send_and_read_exact(ser, hzz_request, hzz_resp_len)
 						hzz_registers = _parse_read_response(hzz_response, REG_HZZ, 1)
 						if hzz_registers:
 							self._last_hzz_hz = decode_frequency_hz(hzz_registers[REG_HZZ])
 
 					ts = time.time()
-					raw_az = registers[REG_AZ]
-					raw_vz = registers[REG_VZ]
-					vz_mm_s = decode_vz_mm_s(raw_vz)
+					vz_mm_s = vz_unsigned
 					hzz_hz = self._last_hzz_hz
 
 					with _lock:
-						_raw_az_history.append(raw_az)
-						_raw_vz_history.append(raw_vz)
+						_raw_vz_history.append(raw_vz_u16)
 						_vz_history.append(vz_mm_s)
 						_hzz_history.append(hzz_hz)
 						_ts_history.append(ts)
+						if decoded_registers:
+							_latest_full_registers = decoded_registers
+						elif self.read_full_registers:
+							_latest_full_registers = {}
 
 					with _log_lock:
 						if _log_active:
 							_log_counter += 1
-							_log_buffer.append({
+							log_row = {
 								'counter': _log_counter,
 								'unix_time': ts,
 								'iso_time': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts)),
-								'raw_az_u16': raw_az,
-								'raw_vz_u16': raw_vz,
+								'raw_vz_u16': raw_vz_u16,
 								'vz_mm_s': vz_mm_s,
 								'hzz_hz': hzz_hz,
-							})
+							}
+							if decoded_registers:
+								log_row.update(decoded_registers)
+							_log_buffer.append(log_row)
 
 					print(
 						f'vz={vz_mm_s:8.3f} mm/s  hzz={hzz_hz:6.1f} Hz',
@@ -305,7 +371,7 @@ def get_histories() -> dict:
 		hzz = list(_hzz_history)
 		ts = list(_ts_history)
 	rel = [stamp - ts[0] for stamp in ts] if ts else []
-	return {'raw_az_u16': raw_az, 'raw_vz_u16': raw_vz, 'vz': vz, 'hzz': hzz, 'ts': ts, 'rel_s': rel}
+	return {'raw_vz_u16': raw_vz, 'vz': vz, 'hzz': hzz, 'ts': ts, 'rel_s': rel}
 
 
 def get_latest_sample() -> dict:
@@ -316,6 +382,7 @@ def get_latest_sample() -> dict:
 			'vz_mm_s': _vz_history[-1],
 			'hzz_hz': _hzz_history[-1],
 			'unix_time': _ts_history[-1],
+			'registers': dict(_latest_full_registers),
 		}
 
 
@@ -366,23 +433,31 @@ def save_log(rpm: int, load_w: int, data: list) -> str:
 		writer.writerow(['# Effective Poll Rate (Hz)', f'{effective_rate_hz:.6f}'])
 		writer.writerow(['# VZ RMS (mm/s)', f'{vz_rms:.6f}'])
 		writer.writerow([])
-		writer.writerow([
+		base_keys = [
 			'counter',
 			'unix_time',
 			'iso_time',
 			'vz_mm_s',
 			'hzz_hz',
 			'raw_vz_u16',
-		])
+		]
+		extra_keys = sorted({
+			key
+			for row in data
+			for key in row.keys()
+			if key not in base_keys
+		})
+		header = base_keys + extra_keys
+		writer.writerow(header)
 		for row in data:
-			writer.writerow([
-				row['counter'],
-				f"{row['unix_time']:.6f}",
-				row['iso_time'],
-				f"{row['vz_mm_s']:.6f}",
-				f"{row['hzz_hz']:.6f}",
-				row['raw_vz_u16'],
-			])
+			row_out = []
+			for key in header:
+				val = row.get(key, '')
+				if isinstance(val, float):
+					row_out.append(f"{val:.6f}")
+				else:
+					row_out.append(val)
+			writer.writerow(row_out)
 
 	print(
 		f'[Logger] Saved -> {filepath} '
@@ -398,7 +473,7 @@ def main():
 	global SENSOR_RATE_HZ, SAMPLING_RATE
 
 	parser = argparse.ArgumentParser(
-		description='Read WTVB02/WTVB01 sensor data using unsigned VZ only for FFT logging.'
+		description='Read WTVB02/WTVB01 sensor data (fast VZ or full register block for raw capture).'
 	)
 	parser.add_argument('--port', default=PORT, help='Serial port, for example COM6')
 	parser.add_argument(
@@ -412,6 +487,11 @@ def main():
 	parser.add_argument('--rpm', type=int, default=0, help='RPM metadata for saved logs')
 	parser.add_argument('--load', type=int, default=0, help='Load metadata in watts for saved logs')
 	parser.add_argument('--log', action='store_true', help='Save a CSV log when the run finishes')
+	parser.add_argument(
+		'--full-registers',
+		action='store_true',
+		help='Read and log the full 0x34-0x49 register block (acc, velocity, displacement).'
+	)
 	parser.add_argument(
 		'--set-rate',
 		type=int,
@@ -429,6 +509,7 @@ def main():
 		baud_candidates=args.baud,
 		sample_rate_hz=args.set_rate or SENSOR_RATE_HZ,
 		auto_configure_sensor_rate=args.set_rate is not None,
+		read_full_registers=args.full_registers,
 	)
 
 	if args.log:
@@ -444,10 +525,18 @@ def main():
 				break
 			latest = get_latest_sample()
 			if latest:
-				print(
+				msg = (
 					f"latest -> vz={latest['vz_mm_s']:+.3f} mm/s, "
 					f"hzz={latest['hzz_hz']:.1f} Hz"
 				)
+				if args.full_registers and latest.get('registers'):
+					regs = latest['registers']
+					acc = [regs.get('reg_acc_x', ''), regs.get('reg_acc_y', ''), regs.get('reg_acc_z', '')]
+					vel = [regs.get('reg_vel_x', ''), regs.get('reg_vel_y', ''), regs.get('reg_vel_z', '')]
+					disp = [regs.get('reg_disp_x', ''), regs.get('reg_disp_y', ''), regs.get('reg_disp_z', '')]
+					hidisp = [regs.get('reg_hi_disp_x', ''), regs.get('reg_hi_disp_y', ''), regs.get('reg_hi_disp_z', '')]
+					msg += f" acc={acc} vel={vel} disp={disp} hi_disp={hidisp}"
+				print(msg)
 			time.sleep(0.5)
 	except KeyboardInterrupt:
 		pass

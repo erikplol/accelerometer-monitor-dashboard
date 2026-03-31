@@ -1,0 +1,735 @@
+import os
+import io
+import zipfile
+import time
+import dash
+from dash import dcc, html, Input, Output, State, ctx
+import plotly.graph_objs as go
+import numpy as np
+from flask import send_file, abort
+
+from data_collect import (
+    MAVLinkReader,
+    get_histories,
+    get_actual_rate,
+    is_connected,
+    start_logging,
+    stop_logging,
+    save_log,
+    get_latest_log_path,
+    get_all_log_paths,
+    SAMPLING_RATE as DC_SAMPLING_RATE,
+    THRESH_GREEN,
+    THRESH_YELLOW,
+)
+
+# ── App setup ─────────────────────────────────────────────────────────────────
+app = dash.Dash(__name__, suppress_callback_exceptions=True)
+app.index_string = '''
+<!DOCTYPE html>
+<html>
+<head>{%metas%}<title>{%title%}</title>{%favicon%}{%css%}
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap');
+
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: #0f1117;
+    height: 100%; overflow: hidden;
+    font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+
+  /* ── Scrollbar ──────────────────────────────────────── */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: #0f1117; }
+  ::-webkit-scrollbar-thumb { background: #2a2d35; border-radius: 3px; }
+
+  /* ── Input focus ring ───────────────────────────────── */
+  input[type=number]:focus {
+    outline: none;
+    border-color: #4f8ef7 !important;
+    box-shadow: 0 0 0 3px rgba(79,142,247,0.15);
+  }
+  input[type=number]::-webkit-inner-spin-button,
+  input[type=number]::-webkit-outer-spin-button { opacity: 0.4; }
+
+  /* ── Button hover effects ───────────────────────────── */
+  .btn-start:hover { filter: brightness(1.15); transform: translateY(-1px); }
+  .btn-stop:hover  { filter: brightness(1.15); transform: translateY(-1px); }
+  .btn-start, .btn-stop { transition: filter 0.15s, transform 0.15s; }
+
+  /* ── Responsive ─────────────────────────────────────── */
+  @media (max-width: 1200px) {
+    .top-strip { flex-wrap: wrap !important; }
+    .top-strip > div.card-narrow { flex: 1 1 140px !important; min-width: 120px !important; max-width: 200px !important; }
+    .top-strip > div.card-wide   { flex: 1 1 220px !important; min-width: 200px !important; }
+  }
+  @media (max-width: 768px) {
+    .top-strip { flex-wrap: wrap !important; }
+    .top-strip > div { flex: 1 1 100% !important; max-width: 100% !important; }
+    .graphs-row { flex-wrap: wrap !important; overflow-y: auto !important; }
+    .graphs-row > div { flex: 1 1 100% !important; min-height: 260px; }
+    html, body { overflow: auto !important; height: auto !important; }
+    #root > div { height: auto !important; overflow: auto !important; }
+  }
+</style>
+</head>
+<body>{%app_entry%}{%config%}{%scripts%}{%renderer%}</body>
+</html>
+'''
+app.title = "Engine Vibration Monitor"
+
+SAMPLING_RATE   = DC_SAMPLING_RATE
+UI_INTERVAL_MS  = 400   # UI refresh rate (ms) — decoupled from sampling rate (lighter)
+MAX_DISPLAY_PTS = 300   # max points plotted per graph (lighter UI)
+FFT_WINDOW_SECONDS = 5.0
+FFT_UPDATE_EVERY_N_INTERVALS = 4  # recompute FFT less often to reduce CPU
+SKIP_FIRST_SECONDS = 3.0  # skip initial calibration window for display
+
+_fft_cache_x = []
+_fft_cache_y = []
+_fft_cache_signature = None
+
+_reader = MAVLinkReader()
+_reader.start()
+
+
+# ── Download endpoints ───────────────────────────────────────────────────────
+@app.server.route('/download/latest-log')
+def download_latest_log():
+    path = get_latest_log_path()
+    if not path or not os.path.isfile(path):
+        abort(404, description='No log available')
+    return send_file(path, as_attachment=True)
+
+
+@app.server.route('/download/all-logs')
+def download_all_logs():
+    paths = get_all_log_paths()
+    if not paths:
+        abort(404, description='No logs available')
+
+    memfile = io.BytesIO()
+    with zipfile.ZipFile(memfile, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
+        for p in paths:
+            zf.write(p, arcname=os.path.basename(p))
+    memfile.seek(0)
+    return send_file(memfile, mimetype='application/zip', as_attachment=True, download_name='logs.zip')
+
+# ── Style helpers ─────────────────────────────────────────────────────────────
+_BG        = '#0f1117'
+_CARD_BG   = '#161b22'
+_BORDER    = '#21262d'
+_TICK_CLR  = '#8b949e'
+_GRID_CLR  = '#21262d'
+_ZERO_CLR  = '#30363d'
+
+_CARD = {
+    'background':    _CARD_BG,
+    'borderRadius':  12,
+    'border':        f'1px solid {_BORDER}',
+    'padding':       '14px 20px',
+    'boxSizing':     'border-box',
+}
+
+_LABEL = {
+    'color':          '#6e7681',
+    'fontSize':       '0.78rem',
+    'fontWeight':     600,
+    'textTransform':  'uppercase',
+    'letterSpacing':  '1px',
+    'marginBottom':   6,
+    'flexShrink':     0,
+}
+
+_INPUT = {
+    'background':    '#0d1117',
+    'color':         '#e6edf3',
+    'border':        f'1px solid {_BORDER}',
+    'borderRadius':  8,
+    'padding':       '7px 11px',
+    'fontSize':      '0.95rem',
+    'width':         130,
+    'outline':       'none',
+    'boxSizing':     'border-box',
+    'transition':    'border-color 0.2s',
+}
+
+
+def _light_style(active: bool, color: str, glow: str) -> dict:
+    if active:
+        return {
+            'width': 40, 'height': 40, 'borderRadius': '50%',
+            'backgroundColor': color,
+            'boxShadow': f'0 0 0 4px rgba(255,255,255,0.06), 0 0 18px 4px {glow}',
+            'transition': 'background-color 0.3s, box-shadow 0.3s',
+        }
+    return {
+        'width': 40, 'height': 40, 'borderRadius': '50%',
+        'backgroundColor': '#1c2128',
+        'border': f'1px solid {_BORDER}',
+        'boxShadow': 'none',
+        'transition': 'background-color 0.3s, box-shadow 0.3s',
+    }
+
+
+# ── Layout ────────────────────────────────────────────────────────────────────
+app.layout = html.Div([
+
+    # ── Header ──────────────────────────────────────────────────────────
+    html.Div([
+        html.Div([
+            html.Div(style={
+                'width': 8, 'height': 8, 'borderRadius': '50%',
+                'backgroundColor': '#58a6ff', 'marginRight': 10,
+                'boxShadow': '0 0 8px rgba(88,166,255,0.7)',
+            }),
+            html.H1("Engine Vibration Monitor", style={
+                'margin': 0, 'color': '#e6edf3',
+                'fontSize': '1.2rem', 'fontWeight': 500, 'letterSpacing': '-0.2px',
+            }),
+        ], style={'display': 'flex', 'alignItems': 'center'}),
+        html.Span(id='conn-status', style={'fontSize': '0.82rem', 'marginLeft': 18}),
+        html.Button(
+            "⏸ Pause",
+            id='btn-pause',
+            n_clicks=0,
+            style={
+                'marginLeft': 'auto',
+                'background': '#30363d', 'color': '#e6edf3',
+                'border': f'1px solid {_BORDER}', 'borderRadius': 8,
+                'padding': '6px 12px', 'fontSize': '0.9rem',
+                'cursor': 'pointer', 'fontFamily': 'inherit'
+            }
+        ),
+    ], style={
+        'padding': '10px 20px',
+        'background': _CARD_BG,
+        'borderBottom': f'1px solid {_BORDER}',
+        'display': 'flex', 'alignItems': 'center', 'flexShrink': 0,
+    }),
+
+    # ── Top strip: RMS | Freq | Severity | Logging ─────────────────────
+    html.Div([
+
+        # RMS card (Acceleration)
+        html.Div([
+            html.Div("RMS AZ", style={**_LABEL, 'textAlign': 'center'}),
+            html.Div([
+                html.Span(id='rms-value', children='—', style={
+                    'color': '#58a6ff',
+                    'fontSize': '2.8rem', 'fontWeight': 300, 'lineHeight': 1,
+                    'fontVariantNumeric': 'tabular-nums',
+                }),
+                html.Span(" m/s^2", style={
+                    'color': '#6e7681', 'fontSize': '0.9rem',
+                    'marginLeft': 5, 'alignSelf': 'flex-end', 'paddingBottom': 3,
+                }),
+            ], style={'display': 'flex', 'alignItems': 'baseline', 'justifyContent': 'center'}),
+        ], style={**_CARD, 'flex': '0 0 160px', 'alignSelf': 'stretch',
+                  'display': 'flex', 'flexDirection': 'column', 'justifyContent': 'center', 'alignItems': 'center',
+                  'borderTop': '2px solid #58a6ff'},
+           className='card-narrow'),
+
+        # Frequency card
+        html.Div([
+            html.Div("Vib. Freq Z", style={**_LABEL, 'textAlign': 'center'}),
+            html.Div([
+                html.Span(id='recv-hz', children='—', style={
+                    'color': '#3fb950',
+                    'fontSize': '2.8rem', 'fontWeight': 300, 'lineHeight': 1,
+                    'fontVariantNumeric': 'tabular-nums',
+                }),
+                html.Span(" Hz", style={
+                    'color': '#6e7681', 'fontSize': '0.9rem',
+                    'marginLeft': 5, 'alignSelf': 'flex-end', 'paddingBottom': 3,
+                }),
+            ], style={'display': 'flex', 'alignItems': 'baseline', 'justifyContent': 'center'}),
+        ], style={**_CARD, 'flex': '0 0 160px', 'alignSelf': 'stretch',
+                  'display': 'flex', 'flexDirection': 'column', 'justifyContent': 'center', 'alignItems': 'center',
+                  'borderTop': '2px solid #3fb950'},
+           className='card-narrow'),
+
+        # Traffic-light card
+        html.Div([
+            html.Div("Severity Level", style={**_LABEL, 'textAlign': 'center', 'marginBottom': 10}),
+            html.Div([
+                # Green
+                html.Div([
+                    html.Div(id='light-green',
+                             style=_light_style(True, '#3fb950', 'rgba(63,185,80,0.5)')),
+                    html.Div("GOOD", style={
+                        'color': '#6e7681', 'fontSize': '0.72rem', 'fontWeight': 600,
+                        'letterSpacing': '0.8px', 'textAlign': 'center', 'marginTop': 5,
+                    }),
+                    html.Div(f"< {THRESH_GREEN}", style={
+                        'color': '#484f58', 'fontSize': '0.66rem',
+                        'textAlign': 'center',
+                    }),
+                ], style={'display': 'flex', 'flexDirection': 'column', 'alignItems': 'center'}),
+
+                # Yellow
+                html.Div([
+                    html.Div(id='light-yellow',
+                             style=_light_style(False, '#d29922', 'rgba(210,153,34,0.5)')),
+                    html.Div("CAUTION", style={
+                        'color': '#6e7681', 'fontSize': '0.72rem', 'fontWeight': 600,
+                        'letterSpacing': '0.8px', 'textAlign': 'center', 'marginTop': 5,
+                    }),
+                    html.Div(f"{THRESH_GREEN}–{THRESH_YELLOW}", style={
+                        'color': '#484f58', 'fontSize': '0.66rem', 'textAlign': 'center',
+                    }),
+                ], style={'display': 'flex', 'flexDirection': 'column', 'alignItems': 'center'}),
+
+                # Red
+                html.Div([
+                    html.Div(id='light-red',
+                             style=_light_style(False, '#f85149', 'rgba(248,81,73,0.5)')),
+                    html.Div("ALARM", style={
+                        'color': '#6e7681', 'fontSize': '0.72rem', 'fontWeight': 600,
+                        'letterSpacing': '0.8px', 'textAlign': 'center', 'marginTop': 5,
+                    }),
+                    html.Div(f"≥ {THRESH_YELLOW}", style={
+                        'color': '#484f58', 'fontSize': '0.66rem', 'textAlign': 'center',
+                    }),
+                ], style={'display': 'flex', 'flexDirection': 'column', 'alignItems': 'center'}),
+
+            ], style={
+                'display': 'flex', 'flexDirection': 'row',
+                'gap': 32, 'alignItems': 'flex-start', 'justifyContent': 'center',
+            }),
+        ], style={**_CARD, 'flex': 2, 'alignSelf': 'stretch',
+                  'display': 'flex', 'flexDirection': 'column', 'alignItems': 'center',
+                  'justifyContent': 'center'},
+           className='card-wide'),
+
+        # Logging card
+        html.Div([
+            html.Div("Data Logging", style={**_LABEL, 'textAlign': 'center'}),
+            html.Div([
+                # RPM input
+                html.Div([
+                    html.Label("RPM", style={**_LABEL, 'marginBottom': 4, 'display': 'block'}),
+                    dcc.Input(
+                        id='rpm-input', type='number',
+                        placeholder='e.g. 1600',
+                        min=0, step=100, debounce=False,
+                        style={**_INPUT, 'width': 110},
+                    ),
+                ], style={'marginRight': 8}),
+
+                # LOAD input
+                html.Div([
+                    html.Label("Load (W)", style={**_LABEL, 'marginBottom': 4, 'display': 'block'}),
+                    dcc.Input(
+                        id='load-input', type='number',
+                        placeholder='e.g. 3000',
+                        min=0, step=500, debounce=False,
+                        style={**_INPUT, 'width': 110},
+                    ),
+                ], style={'marginRight': 14}),
+
+                # Buttons
+                html.Div([
+                    html.Label('\u00a0', style={'display': 'block', 'marginBottom': 4, 'fontSize': '0.78rem'}),
+                    html.Div([
+                        html.Button("▶  Start", id='btn-start-log', n_clicks=0,
+                            className='btn-start',
+                            style={
+                                'background': 'linear-gradient(135deg, #238636, #2ea043)',
+                                'color': '#fff', 'border': '1px solid #2ea043',
+                                'borderRadius': 8, 'padding': '7px 16px',
+                                'fontSize': '0.9rem', 'cursor': 'pointer',
+                                'fontWeight': 500, 'marginRight': 8,
+                                'fontFamily': 'inherit',
+                            }),
+                        html.Button("■  Stop", id='btn-stop-log', n_clicks=0,
+                            className='btn-stop',
+                            style={
+                                'background': 'linear-gradient(135deg, #b62324, #da3633)',
+                                'color': '#fff', 'border': '1px solid #da3633',
+                                'borderRadius': 8, 'padding': '7px 16px',
+                                'fontSize': '0.9rem', 'cursor': 'pointer',
+                                'fontWeight': 500,
+                                'fontFamily': 'inherit',
+                            }),
+                    ], style={'display': 'flex', 'alignItems': 'center'}),
+                ]),
+
+                html.Div(id='log-status', children='', style={
+                    'marginLeft': 12, 'color': '#6e7681',
+                    'fontSize': '0.8rem', 'alignSelf': 'flex-end', 'paddingBottom': 2,
+                }),
+                html.Div([
+                    html.A("⬇ Download last log", href='/download/latest-log', target='_blank', style={
+                        'color': '#58a6ff', 'textDecoration': 'none', 'fontSize': '0.86rem',
+                        'marginRight': 10,
+                    }),
+                    html.A("⬇ Download all logs", href='/download/all-logs', target='_blank', style={
+                        'color': '#58a6ff', 'textDecoration': 'none', 'fontSize': '0.86rem',
+                    }),
+                ], style={'display': 'flex', 'alignItems': 'center', 'marginLeft': 12, 'marginTop': 6}),
+            ], style={
+                'display': 'flex', 'alignItems': 'flex-end',
+                'justifyContent': 'center', 'flexWrap': 'nowrap', 'marginTop': 8,
+            }),
+        ], style={**_CARD, 'flex': 2, 'alignSelf': 'stretch',
+                  'display': 'flex', 'flexDirection': 'column',
+                  'justifyContent': 'center', 'alignItems': 'center'},
+           className='card-wide'),
+
+    ], className='top-strip', style={
+        'display': 'flex', 'padding': '8px 14px 6px',
+        'gap': 8, 'flexShrink': 0, 'alignItems': 'stretch', 'flexWrap': 'wrap',
+    }),
+
+    # ── Graphs row ──────────────────────────────────────────────────────
+    html.Div([
+
+        # Graph 1 – AZ vs time
+        html.Div([
+            html.Div("AZ · Real Time", style={**_LABEL, 'marginBottom': 4}),
+            dcc.Graph(
+                id='vz-time-graph',
+                style={'flex': 1, 'minHeight': 0},
+                config={
+                    'displayModeBar': True,
+                    'displaylogo': False,
+                    'modeBarButtonsToRemove': ['lasso2d', 'select2d', 'autoScale2d', 'hoverCompareCartesian', 'hoverClosestCartesian'],
+                    'toImageButtonOptions': {'format': 'png', 'filename': 'az_time', 'height': 480, 'width': 800, 'scale': 1},
+                    'responsive': True,
+                },
+            ),
+        ], style={
+            **_CARD, 'flex': 1,
+            'display': 'flex', 'flexDirection': 'column', 'minHeight': 0,
+        }),
+
+        # Graph 2 – FFT
+        html.Div([
+            html.Div("Frequency Spectrum · FFT", style={**_LABEL, 'marginBottom': 4}),
+            dcc.Graph(
+                id='fft-graph',
+                style={'flex': 1, 'minHeight': 0},
+                config={
+                    'displayModeBar': True,
+                    'displaylogo': False,
+                    'modeBarButtonsToRemove': ['lasso2d', 'select2d', 'autoScale2d', 'hoverCompareCartesian', 'hoverClosestCartesian'],
+                    'toImageButtonOptions': {'format': 'png', 'filename': 'fft_spectrum_az', 'height': 480, 'width': 800, 'scale': 1},
+                    'responsive': True,
+                },
+            ),
+        ], style={
+            **_CARD, 'flex': 1,
+            'display': 'flex', 'flexDirection': 'column', 'minHeight': 0,
+        }),
+
+    ], className='graphs-row', style={
+        'display': 'flex', 'padding': '6px 14px 10px',
+        'gap': 8, 'flex': 1, 'minHeight': 0, 'overflow': 'hidden',
+    }),
+
+    # ── Stores & interval ────────────────────────────────────────────────
+    dcc.Store(id='log-store', data={'active': False, 'rpm': 0, 'load': 0, 'start_time': 0}),
+    dcc.Store(id='view-store', data={'paused': False}),
+    dcc.Interval(id='interval-component', interval=UI_INTERVAL_MS, n_intervals=0, disabled=False),
+
+], style={
+    'fontFamily': '"Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+    'backgroundColor': _BG,
+    'height':          '100vh',
+    'margin':          0,
+    'display':         'flex',
+    'flexDirection':   'column',
+    'overflow':        'hidden',
+})
+
+# ── Shared plot config ─────────────────────────────────────────────────────────
+_YAXIS_ACC = dict(
+    gridcolor=_GRID_CLR, color=_TICK_CLR, zeroline=True,
+    zerolinecolor=_ZERO_CLR, zerolinewidth=1,
+    title=dict(text='m/s^2', font=dict(size=10, color=_TICK_CLR)),
+    tickfont=dict(size=10),
+    showgrid=True,
+)
+
+
+
+
+# ── Callbacks ─────────────────────────────────────────────────────────────────
+
+@app.callback(
+    [Output('interval-component', 'disabled'),
+     Output('btn-pause', 'children'),
+     Output('view-store', 'data')],
+    Input('btn-pause', 'n_clicks'),
+    State('view-store', 'data'),
+    prevent_initial_call=True,
+)
+def toggle_pause(n_clicks, view_data):
+    paused = not view_data.get('paused', False)
+    label = "▶ Resume" if paused else "⏸ Pause"
+    return paused, label, {'paused': paused}
+
+@app.callback(
+    [Output('vz-time-graph', 'figure'),
+     Output('fft-graph',     'figure'),
+     Output('rms-value',     'children'),
+     Output('recv-hz',       'children'),
+     Output('light-red',     'style'),
+     Output('light-yellow',  'style'),
+     Output('light-green',   'style'),
+     Output('conn-status',   'children'),
+     Output('conn-status',   'style')],
+    Input('interval-component', 'n_intervals'),
+)
+def update_dashboard(n):
+    global _fft_cache_x, _fft_cache_y, _fft_cache_signature
+
+    h      = get_histories()
+    az_all  = h.get('az_ms2', [])         # Z acceleration in m/s^2
+    rel_all = h['rel_s']
+
+    # Skip initial calibration window for display stability
+    filtered = [(az, t) for az, t in zip(az_all, rel_all) if t >= SKIP_FIRST_SECONDS]
+    if filtered:
+        az_all  = [p[0] for p in filtered]
+        rel_all = [p[1] for p in filtered]
+    else:
+        az_all, rel_all = [], []
+
+    # Downsample for display — keeps the browser responsive
+    if len(az_all) > MAX_DISPLAY_PTS:
+        step = max(1, len(az_all) // MAX_DISPLAY_PTS)
+        az_display = az_all[::step]
+        rel = rel_all[::step]
+    else:
+        az_display = az_all
+        rel = rel_all
+
+    AZ_COLOR    = '#58a6ff'
+    EMPTY_STYLE = {'color': '#f85149', 'fontSize': '0.82rem', 'marginLeft': 18}
+    OK_STYLE    = {'color': '#3fb950', 'fontSize': '0.82rem', 'marginLeft': 18}
+
+    # ── Connection ──────────────────────────────────────────────────────
+    connected  = is_connected()
+    actual_rate = get_actual_rate()
+    if connected:
+        conn_label = f'● Connected @ {actual_rate:.1f} Hz'
+    else:
+        conn_label = '● Disconnected'
+    conn_style = OK_STYLE if connected else EMPTY_STYLE
+
+    # ── Velocity RMS over last 1 second (mm/s) ─────────────────────────────
+    n_1s = max(1, int(SAMPLING_RATE))
+    az_window = az_all[-n_1s:] if az_all else []
+    if az_window:
+        rms = float(np.sqrt(np.mean(np.array(az_window) ** 2)))
+        rms_label = f"{rms:.2f}"
+    else:
+        rms = 0.0
+        rms_label = "—"
+
+    # ── Dominant frequency from FFT peak ────────────────────────────────
+    # Calculate from cached FFT data instead of sensor register
+    dominant_hz = 0.0
+    if _fft_cache_x and _fft_cache_y:
+        peak_idx = int(np.argmax(_fft_cache_y))
+        if peak_idx < len(_fft_cache_x):
+            dominant_hz = _fft_cache_x[peak_idx]
+    hz_label = f"{dominant_hz:.1f}" if dominant_hz > 0 else "—"
+
+    # ── Traffic light ──────────────────────────────────────────────────
+    is_red    = rms >= THRESH_YELLOW
+    is_yellow = THRESH_GREEN <= rms < THRESH_YELLOW
+    is_green  = rms < THRESH_GREEN
+
+    style_red    = _light_style(is_red,    '#f85149', 'rgba(248,81,73,0.55)')
+    style_yellow = _light_style(is_yellow, '#d29922', 'rgba(210,153,34,0.55)')
+    style_green  = _light_style(is_green,  '#3fb950', 'rgba(63,185,80,0.55)')
+
+    # ── Graph 1: VZ vs time ────────────────────────────────────────────
+    _xaxis_s = go.layout.XAxis(
+        gridcolor=_GRID_CLR, color=_TICK_CLR, zeroline=False,
+        title=go.layout.xaxis.Title(text='s', font=dict(size=10, color=_TICK_CLR)),
+        tickfont=dict(size=10),
+    )
+    _yaxis_v = go.layout.YAxis(
+        gridcolor=_GRID_CLR, color=_TICK_CLR, zeroline=True,
+        zerolinecolor=_ZERO_CLR, zerolinewidth=1,
+        title=dict(text='m/s^2', font=dict(size=10, color=_TICK_CLR)),
+        tickfont=dict(size=10),
+        showgrid=True,
+    )
+    time_fig = go.Figure(
+        data=[
+            go.Scattergl(
+                x=rel, y=az_display,
+                mode='lines', line=dict(color=AZ_COLOR, width=1.5),
+                name='AZ',
+                hovertemplate='%{y:.3f} m/s^2<extra></extra>',
+            )
+        ],
+        layout=go.Layout(
+            plot_bgcolor=_CARD_BG, paper_bgcolor=_CARD_BG,
+            margin=dict(l=52, r=12, t=10, b=32),
+            hovermode='x unified',
+            font=dict(color=_TICK_CLR, size=10),
+            xaxis=_xaxis_s,
+            yaxis=_yaxis_v,
+            showlegend=False,
+            uirevision='vz-time',
+        ),
+    )
+
+    # ── Graph 2: FFT (velocity spectrum in mm/s) ─────────────────────────
+
+    fft_traces = []
+    fft_shapes = []
+
+    # Use actual sampling rate for correct frequency calculation
+    effective_rate = actual_rate if actual_rate > 0 else SAMPLING_RATE
+    n_fft_window = max(64, int(effective_rate * FFT_WINDOW_SECONDS))
+    should_update_fft = (n % FFT_UPDATE_EVERY_N_INTERVALS == 0)
+    if len(az_all) >= n_fft_window and should_update_fft:
+        # FFT uses Z-axis acceleration in m/s^2
+        N = n_fft_window
+        segment = np.array(az_all[-N:], dtype=float)
+        segment = segment - segment.mean()
+
+        window        = np.hanning(N)
+        coherent_gain = float(window.mean()) if N > 0 else 1.0
+        spectrum      = np.fft.rfft(segment * window)
+        fft_vals      = np.abs(spectrum) / (N * coherent_gain)
+        freqs         = np.fft.rfftfreq(N, d=1.0 / effective_rate)  # Use actual rate
+
+        if len(fft_vals) > 2:
+            fft_vals[1:-1] *= 2.0
+
+        # Drop DC bin (index 0)
+        freqs    = freqs[1:]
+        fft_vals = fft_vals[1:]
+
+        _fft_cache_x = freqs.tolist()
+        _fft_cache_y = fft_vals.tolist()
+        _fft_cache_signature = (len(az_all), az_all[-1], N)
+
+    if _fft_cache_signature is not None and _fft_cache_x:
+        fft_traces.append(go.Scattergl(
+            x=_fft_cache_x, y=_fft_cache_y,
+            mode='lines', fill='tozeroy',
+            line=dict(color=AZ_COLOR, width=1.5),
+            fillcolor='rgba(88,166,255,0.15)',
+            name='FFT',
+            hovertemplate='%{x:.2f} Hz  %{y:.3f} m/s^2<extra></extra>',
+        ))
+
+    x_max = max(effective_rate / 2.0, (dominant_hz or 0) * 1.2, 5.0)
+
+    fft_fig = go.Figure(
+        data=fft_traces,
+        layout=go.Layout(
+            plot_bgcolor=_CARD_BG, paper_bgcolor=_CARD_BG,
+            margin=dict(l=52, r=12, t=10, b=32),
+            hovermode='x unified',
+            font=dict(color=_TICK_CLR, size=10),
+            shapes=fft_shapes,
+            xaxis=go.layout.XAxis(
+                gridcolor=_GRID_CLR, color=_TICK_CLR, zeroline=False,
+                range=[0, x_max],
+                title=go.layout.xaxis.Title(
+                    text='Hz', font=dict(size=10, color=_TICK_CLR)
+                ),
+                tickfont=dict(size=10),
+            ),
+            yaxis=go.layout.YAxis(
+                **{
+                    **_YAXIS_ACC,
+                    'title': dict(text='m/s^2', font=dict(size=10, color=_TICK_CLR)),
+                    'rangemode': 'nonnegative',
+                },
+            ),
+            showlegend=False,
+            uirevision='fft',
+        ),
+    )
+
+    return (
+        time_fig, fft_fig, rms_label, hz_label,
+        style_red, style_yellow, style_green,
+        conn_label, conn_style,
+    )
+
+
+LOG_DURATION_S = 30
+
+
+def _do_stop(log_data, auto=False):
+    """Stop recording, pause the serial reader, save, then resume."""
+    _reader.pause()
+    try:
+        data     = stop_logging()
+        rpm_val  = log_data.get('rpm',  0)
+        load_val = log_data.get('load', 0)
+        path     = save_log(rpm_val, load_val, data)
+        fname    = os.path.basename(path)
+    finally:
+        _reader.resume()
+    prefix = '✔ Auto-saved' if auto else '✔ Saved'
+    return (
+        f"{prefix} {len(data)} samples — {fname}",
+        {'active': False, 'rpm': rpm_val, 'load': load_val, 'start_time': 0},
+    )
+
+
+@app.callback(
+    [Output('log-status', 'children'),
+     Output('log-store',  'data')],
+    [Input('btn-start-log',       'n_clicks'),
+     Input('btn-stop-log',        'n_clicks'),
+     Input('interval-component',  'n_intervals')],
+    [State('rpm-input',  'value'),
+     State('load-input', 'value'),
+     State('log-store',  'data')],
+    prevent_initial_call=True,
+)
+def handle_logging(n_start, n_stop, n_intervals, rpm, load_w, log_data):
+    triggered = ctx.triggered_id
+    active    = log_data.get('active', False)
+
+    if triggered == 'btn-start-log':
+        if active:
+            return "⚠ Already recording — stop first.", log_data
+        rpm_val  = int(rpm)    if rpm    is not None else 0
+        load_val = int(load_w) if load_w is not None else 0
+        start_logging()
+        return (
+            f"● Recording…  {LOG_DURATION_S}s  |  RPM = {rpm_val}  |  Load = {load_val} W",
+            {'active': True, 'rpm': rpm_val, 'load': load_val, 'start_time': time.time()},
+        )
+
+    if triggered == 'btn-stop-log':
+        if not active:
+            return "⚠ No active recording.", log_data
+        return _do_stop(log_data)
+
+    if triggered == 'interval-component':
+        if not active:
+            return dash.no_update, dash.no_update
+        elapsed   = time.time() - log_data.get('start_time', time.time())
+        remaining = LOG_DURATION_S - elapsed
+        if remaining <= 0:
+            return _do_stop(log_data, auto=True)
+        rpm_val  = log_data.get('rpm',  0)
+        load_val = log_data.get('load', 0)
+        return (
+            f"● Recording…  {int(remaining)}s left  |  RPM = {rpm_val}  |  Load = {load_val} W",
+            dash.no_update,
+        )
+
+    return dash.no_update, dash.no_update
+
+
+if __name__ == '__main__':
+    app.run(debug=True, dev_tools_ui=False, use_reloader=False, host='0.0.0.0', port=7777)

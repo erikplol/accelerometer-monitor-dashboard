@@ -1,102 +1,88 @@
 # Engine Vibration Monitor
 
-Real-time Z-axis vibration velocity monitoring dashboard for the WTVB02-485 sensor, built with Dash/Plotly. Designed to run on a Raspberry Pi (or any Ubuntu/Debian machine) and be accessed from any device on the local network.
+Dash/Plotly dashboard for real-time engine vibration monitoring from two sources:
+- Pixhawk/ArduPilot via MAVLink (Z acceleration → velocity)
+- Witmotion WTVB Modbus sensor (velocity & dominant frequency)
+
+Designed for Raspberry Pi or any Linux host; accessible from any device on the LAN.
 
 ## Features
 
-- **Real-time time-domain graph** — VZ (mm/s) vs elapsed seconds, 60-second rolling window
-- **FFT frequency spectrum** — live single-sided amplitude spectrum (mm/s vs Hz)
-- **RMS indicator** — RMS of the last 1-second window, updated every cycle
-- **Traffic-light severity panel** — ISO 10816-based thresholds (green / yellow / red)
-- **Data logging** — start/stop log sessions tagged with RPM and Load (W); saved as CSV to `logs/`
-- **nginx reverse proxy** — optional setup script to serve the dashboard on port 80 with a `.local` domain
+- Real-time VZ time series (mm/s) with compact display window
+- Live FFT spectrum (Pixhawk velocity) with configurable window length
+- RMS indicator (last ~1s) with ISO 10816 traffic-light thresholds
+- Data logging with RPM/Load tags; download latest or all logs as CSV/zip
+- Pause/resume UI updates without stopping collectors
 
-## Hardware
-
-| Parameter | Value |
-|-----------|-------|
-| Sensor    | WTVB02-485 (Modbus RTU) |
-| Interface | USB–RS485 adapter |
-| Port      | `/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0` |
-| Baud rate | 9600 |
-| Register  | `0x3C` — VZ vibration velocity (mm/s, signed 16-bit) |
-
-## Installation
+## Quick start
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-```
 
-## Run
-
-```bash
-./run.sh          # activates .venv and starts the app
-# or
+# Run
 python app.py
+# or
+python scripts/serve.py
 ```
 
-Open your browser to: **http://localhost:7777**
+Open: **http://localhost:7777** (or the host IP on your LAN).
 
-## Network Access (Reverse Proxy)
+## Configuration
 
-To access the dashboard from any device on the LAN via a fixed URL (no port number), run the included setup script once:
+UI & app settings: [src/config/settings.py](src/config/settings.py)
+- `HOST`, `PORT`, `DEBUG`, `UI_INTERVAL_MS`, `DISPLAY_SECONDS`, `FFT_WINDOW_SECONDS`, `FFT_UPDATE_EVERY_N_INTERVALS`, `MAX_DISPLAY_PTS`
+
+Pixhawk (MAVLink): environment variables (see [src/sensors/pixhawk.py](src/sensors/pixhawk.py))
+- `MAVLINK_PORT` (default: by-id CubeOrange path)
+- `MAVLINK_BAUD` (default: 921600)
+- `MAVLINK_IMU_RATE_HZ` (default: 100)
+
+Witmotion (Modbus): environment variables (see [src/sensors/witmotion.py](src/sensors/witmotion.py))
+- `WTVB_PORT` (default: by-id USB-Serial)
+- `WTVB_BAUD_CANDIDATES` (default: 115200,38400,9600 — auto-tries in order)
+- `WTVB_MODBUS_ADDR`, `WTVB_SENSOR_RATE_HZ`
+
+Logs: saved to `logs/` with names `vibration_RPM{rpm}_LOAD{load}W_{YYYYmmdd_HHMMSS}.csv`.
+
+## Usage (UI)
+
+1) Connect sensors, start the app.
+2) Observe real-time VZ and FFT graphs.
+3) Logging: enter RPM and Load (W), click **▶ Start**; stop manually or wait for auto-stop (~30s). Use download links in the header.
+4) Pause button stops UI updates while collectors keep running.
+
+## Thresholds (ISO 10816, velocity RMS)
+
+| Light | Condition | Meaning |
+|-------|-----------|---------|
+| 🟢 Green  | RMS < 2.8 mm/s | Good |
+| 🟡 Yellow | 2.8–7.1 mm/s   | Acceptable |
+| 🔴 Red    | RMS ≥ 7.1 mm/s | Alarm |
+
+## Project layout (refactored)
+
+- [app.py](app.py) — entrypoint, exposes `server` for WSGI
+- [scripts/serve.py](scripts/serve.py) — CLI launcher
+- [src/dashboard/app.py](src/dashboard/app.py) — Dash layout & callbacks
+- [src/dashboard/figures.py](src/dashboard/figures.py) — plot builders
+- [src/sensors/pixhawk.py](src/sensors/pixhawk.py) — MAVLink reader & logging
+- [src/sensors/witmotion.py](src/sensors/witmotion.py) — Modbus reader
+- [src/utils/fft.py](src/utils/fft.py) — FFT helper
+- [src/config/settings.py](src/config/settings.py) — UI/network constants
+- [legacy/](legacy/) — archived legacy scripts (pre-refactor)
+
+## Reverse proxy (optional)
+
+Run once if you want port 80 + `.local` hostname:
 
 ```bash
 sudo ./setup_proxy.sh
 ```
 
-This script:
-- Sets the machine hostname to **`vibration-monitor`**
-- Installs **nginx** and **avahi-daemon**
-- Creates an nginx reverse proxy config: port 80 → `localhost:7777`
-- Enables mDNS so `.local` hostnames broadcast on the LAN
+Then access:
+- This machine: `http://vibration-monitor.local` or `http://localhost`
+- Any LAN device: `http://vibration-monitor.local`
 
-After setup, access the dashboard via:
-
-| From | URL |
-|------|-----|
-| This machine | `http://vibration-monitor.local` or `http://localhost` |
-| Any LAN device (phone, laptop, etc.) | `http://vibration-monitor.local` |
-
-> **Note:** The app must still be running (`./run.sh`) for the proxy to forward to. nginx only handles routing.
-
-> **Windows clients:** Windows does not support mDNS by default. Add this line to `C:\Windows\System32\drivers\etc\hosts` (as Administrator), replacing the IP with your Pi's actual LAN IP:
-> ```
-> 192.168.x.x   vibration-monitor.local
-> ```
-
-## Vibration Severity Thresholds
-
-| Light  | Condition          | Meaning     |
-|--------|--------------------|-------------|
-| 🟢 Green  | RMS < 2.8 mm/s     | Good        |
-| 🟡 Yellow | 2.8 – 7.1 mm/s     | Acceptable  |
-| 🔴 Red    | RMS ≥ 7.1 mm/s     | Alarm       |
-
-## Data Logging
-
-1. Enter **RPM** and **Load (W)** in the logging panel.
-2. Click **▶ Start** to begin recording.
-3. Click **■ Stop & Save** to end the session and write the CSV.
-
-Log files are saved in `logs/` with the naming convention:
-
-```
-vibration_RPM{rpm}_LOAD{load}W_{YYYYmmdd_HHMMSS}.csv
-```
-
-Each file contains a metadata header (RPM, Load, timestamp, sample count, RMS) followed by per-sample rows: `counter, unix_time, iso_time, vz_mm_s`.
-
-## Configuration
-
-Edit the top of `data_collect.py`:
-
-| Variable        | Default | Description                        |
-|-----------------|---------|------------------------------------|
-| `PORT`          | (by-id path) | Serial port of the RS-485 adapter |
-| `BAUD`          | `9600`  | Modbus baud rate                   |
-| `MODBUS_ADDR`   | `0x50`  | Device Modbus address              |
-| `SAMPLING_RATE` | `10.0`  | Polling rate (Hz)                  |
-| `MAX_TIME_PTS`  | `600`   | Rolling buffer size (samples)      |
+> Windows lacks mDNS by default; add a hosts entry pointing `vibration-monitor.local` to the device IP if needed.

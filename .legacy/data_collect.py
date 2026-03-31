@@ -67,11 +67,15 @@ MG_TO_MS2 = 9.80665 / 1000.0
 # ~0.5 Hz cutoff is typical for machine vibration
 HP_CUTOFF_HZ = 0.5
 
+# Exponential smoothing for velocity (0..1). Higher → smoother.
+VEL_SMOOTH_ALPHA = 0.85
+
 # ---------------------------------------------------------------------------
 # Shared data buffers
 # ---------------------------------------------------------------------------
 _az_ms2_history = deque(maxlen=MAX_TIME_PTS)  # Z acceleration in m/s^2 (for FFT)
-_vz_mms_history = deque(maxlen=MAX_TIME_PTS)  # Z velocity in mm/s (integrated)
+_vz_raw_mms_history = deque(maxlen=MAX_TIME_PTS)  # Unsmooth velocity for FFT/RMS
+_vz_mms_history = deque(maxlen=MAX_TIME_PTS)      # Smoothed velocity for display
 _ts_history = deque(maxlen=MAX_TIME_PTS)
 
 _lock = threading.Lock()
@@ -98,55 +102,53 @@ class VelocityIntegrator:
     preserving oscillatory (vibration) components.
     """
 
-    def __init__(self, sample_rate: float, cutoff_hz: float = 0.5):
+    def __init__(self, sample_rate: float, cutoff_hz: float = 0.5, max_dt: float = 0.1):
         self.sample_rate = sample_rate
         self.cutoff_hz = cutoff_hz
+        self.max_dt = max_dt
+        # Use half the target period as a reasonable minimum dt guard
+        self.min_dt = max(1.0 / (sample_rate * 2.0), 0.001)
+        self.reset()
 
-        # High-pass filter coefficient
+    def _alpha(self, dt: float) -> float:
         # alpha = RC / (RC + dt), where RC = 1/(2*pi*fc)
-        dt = 1.0 / sample_rate
-        rc = 1.0 / (2.0 * np.pi * cutoff_hz)
-        self.alpha = rc / (rc + dt)
-
-        # State
-        self.velocity = 0.0
-        self.prev_velocity = 0.0
-        self.prev_accel = 0.0
-        self.last_time = None
+        rc = 1.0 / (2.0 * np.pi * self.cutoff_hz)
+        return rc / (rc + dt)
 
     def update(self, accel_ms2: float, timestamp: float) -> float:
-        """
-        Update with new acceleration sample, return filtered velocity in mm/s.
-        """
+        """Update with new acceleration sample, return high-pass velocity in mm/s."""
         if self.last_time is None:
             self.last_time = timestamp
-            self.prev_accel = accel_ms2
+            self._prev_accel = accel_ms2
             return 0.0
 
         dt = timestamp - self.last_time
-        dt = min(max(dt, 0.001), 0.1)  # Clamp to reasonable range
+        if dt <= 0.0:
+            dt = self.min_dt
+        dt = min(dt, self.max_dt)
 
-        # Integrate acceleration to velocity (m/s)
-        # Using trapezoidal integration
-        delta_v = 0.5 * (accel_ms2 + self.prev_accel) * dt
-        raw_velocity = self.prev_velocity + delta_v
+        # Trapezoidal integration of acceleration → raw velocity (m/s)
+        delta_v = 0.5 * (accel_ms2 + self._prev_accel) * dt
+        v_raw = self._v_raw + delta_v
 
-        # High-pass filter to remove drift
-        # y[n] = alpha * (y[n-1] + x[n] - x[n-1])
-        self.velocity = self.alpha * (self.velocity + raw_velocity - self.prev_velocity)
+        # First-order high-pass on velocity to bleed off drift
+        alpha = self._alpha(dt)
+        v_hp = alpha * (self._v_hp + v_raw - self._prev_v_raw)
 
         # Update state
-        self.prev_velocity = raw_velocity
-        self.prev_accel = accel_ms2
+        self._prev_accel = accel_ms2
+        self._prev_v_raw = v_raw
+        self._v_raw = v_raw
+        self._v_hp = v_hp
         self.last_time = timestamp
 
-        # Return velocity in mm/s
-        return self.velocity * 1000.0
+        return v_hp * 1000.0
 
     def reset(self):
-        self.velocity = 0.0
-        self.prev_velocity = 0.0
-        self.prev_accel = 0.0
+        self._v_raw = 0.0
+        self._prev_v_raw = 0.0
+        self._v_hp = 0.0
+        self._prev_accel = 0.0
         self.last_time = None
 
 
@@ -179,14 +181,29 @@ class MAVLinkReader(threading.Thread):
         self._gravity_offset = 0.0
         self._calibrated = False
         self._calibration_samples = []
+        self._load_calibration()
 
         # Rate measurement
         self._msg_count = 0
         self._rate_window_start = None
         self._rate_window_count = 0
 
-        # Velocity integrator
+        # Velocity integrator & smoothing state
         self._integrator = VelocityIntegrator(target_rate_hz, HP_CUTOFF_HZ)
+        self._vz_smooth = 0.0
+
+    def _load_calibration(self):
+        """Load prior offset as a hint, but always re-calibrate on start."""
+        calib_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'calibration.txt')
+        try:
+            if os.path.exists(calib_file):
+                with open(calib_file, 'r') as f:
+                    self._gravity_offset = float(f.read().strip())
+                # Use as initial guess but force fresh calibration each run
+                self._calibrated = False
+                print(f"[MAVLink] Loaded prior gravity hint: {self._gravity_offset:.2f} mG (will recalibrate)")
+        except Exception as e:
+            print(f"[MAVLink] Could not load calibration: {e}")
 
     def _connect(self) -> mavutil.mavlink_connection:
         print(f'[MAVLink] Connecting to {self.port} @ {self.baud} baud...')
@@ -234,12 +251,37 @@ class MAVLinkReader(threading.Thread):
         if self._calibrated:
             return
 
+        # Collect a larger window for a stable estimate and reject spikes
         self._calibration_samples.append(zacc_mg)
+        if len(self._calibration_samples) < 200:
+            return
 
-        if len(self._calibration_samples) >= 50:
-            self._gravity_offset = np.median(self._calibration_samples)
-            self._calibrated = True
-            print(f'[MAVLink] Gravity calibrated: offset = {self._gravity_offset:.2f} mG')
+        samples = np.array(self._calibration_samples[-400:])  # use the most recent chunk
+        median = float(np.median(samples))
+        mad = float(np.median(np.abs(samples - median)))
+
+        # Detect motion: if dispersion is high, defer calibration
+        if mad > 15.0:  # mG spread threshold for “still”
+            return
+
+        # Trim outliers using MAD-based gate
+        gate = 3.5 * mad if mad > 0 else 5.0
+        trimmed = samples[np.abs(samples - median) <= gate]
+        if len(trimmed) < 50:
+            return
+
+        self._gravity_offset = float(np.median(trimmed))
+        self._calibrated = True
+        print(f'[MAVLink] Gravity calibrated: offset = {self._gravity_offset:.2f} mG')
+
+        # Save it so it's used for every subsequent run
+        calib_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'calibration.txt')
+        try:
+            with open(calib_file, 'w') as f:
+                f.write(str(self._gravity_offset))
+            print(f"[MAVLink] Saved calibration to {calib_file}")
+        except Exception:
+            pass
 
     def _update_rate_measurement(self, ts: float):
         global _actual_rate_hz
@@ -257,13 +299,14 @@ class MAVLinkReader(threading.Thread):
             self._rate_window_count = 0
 
     def _reset_state(self):
-        """Reset calibration and rate state for reconnection."""
-        self._gravity_offset = 0.0
-        self._calibrated = False
-        self._calibration_samples = []
+        """Reset rate state for reconnection."""
         self._rate_window_start = None
         self._rate_window_count = 0
         self._integrator.reset()
+        self._vz_smooth = 0.0
+        # Force calibration on next run
+        self._calibrated = False
+        self._calibration_samples = []
 
     def run(self):
         global _connected, _actual_rate_hz
@@ -276,6 +319,10 @@ class MAVLinkReader(threading.Thread):
                 connection = self._connect()
                 self._configure_stream_rate(connection)
                 _connected = True
+
+                # Always recalibrate at the start of each connection
+                self._calibrated = False
+                self._calibration_samples = []
 
                 print(f'[MAVLink] Starting data collection')
                 print('[MAVLink] Calibrating gravity offset (keep device still)...')
@@ -307,20 +354,24 @@ class MAVLinkReader(threading.Thread):
                     az_ms2 = zacc_corrected * MG_TO_MS2
 
                     # Integrate acceleration to velocity (mm/s)
-                    vz_mms = self._integrator.update(az_ms2, ts)
+                    vz_raw = self._integrator.update(az_ms2, ts)
+
+                    # Smooth velocity to reduce display jitter
+                    self._vz_smooth = (VEL_SMOOTH_ALPHA * self._vz_smooth) + ((1.0 - VEL_SMOOTH_ALPHA) * vz_raw)
+                    vz_smooth = self._vz_smooth
 
                     with _lock:
                         _az_ms2_history.append(az_ms2)
-                        _vz_mms_history.append(vz_mms)
+                        _vz_raw_mms_history.append(vz_raw)
+                        _vz_mms_history.append(vz_smooth)
                         _ts_history.append(ts)
                         
                         # Evaluate GPIO traffic lights every 25 samples (~0.25s at 100Hz)
                         if self._msg_count % 25 == 0:
                             n_1s = max(1, int(self.target_rate_hz))
-                            if len(_vz_mms_history) >= n_1s:
-                                # Convert deque to list/array to calculate RMS
-                                # Take the last 1 second of data
-                                recent_vz = list(_vz_mms_history)[-n_1s:]
+                            if len(_vz_raw_mms_history) >= n_1s:
+                                # Use raw velocity for RMS/severity to keep spectrum accurate
+                                recent_vz = list(_vz_raw_mms_history)[-n_1s:]
                                 rms = float(np.sqrt(np.mean(np.array(recent_vz) ** 2)))
                                 
                                 is_red    = rms >= THRESH_YELLOW
@@ -340,12 +391,13 @@ class MAVLinkReader(threading.Thread):
                                 'unix_time': ts,
                                 'iso_time': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts)),
                                 'az_ms2': az_ms2,
-                                'vz_mms': vz_mms,
+                                'vz_raw_mms': vz_raw,
+                                'vz_mms': vz_smooth,
                             })
 
                     if self._msg_count % 25 == 0:
                         print(
-                            f'az={az_ms2:+8.4f} m/s²  vz={vz_mms:+8.2f} mm/s  rate={_actual_rate_hz:.1f} Hz',
+                            f'az={az_ms2:+8.4f} m/s²  vz={vz_smooth:+8.2f} mm/s  rate={_actual_rate_hz:.1f} Hz',
                             end='\r',
                         )
 
@@ -391,12 +443,14 @@ def get_histories() -> dict:
     """Get all history buffers for plotting/FFT."""
     with _lock:
         az_ms2 = list(_az_ms2_history)
+        vz_raw = list(_vz_raw_mms_history)
         vz_mms = list(_vz_mms_history)
         ts = list(_ts_history)
     rel = [stamp - ts[0] for stamp in ts] if ts else []
     return {
-        'az_ms2': az_ms2,    # Z acceleration in m/s^2 (for FFT)
-        'vz': vz_mms,        # Z velocity in mm/s (for display/RMS)
+        'az_ms2': az_ms2,     # Z acceleration in m/s^2 (for FFT)
+        'vz': vz_mms,         # Smoothed Z velocity in mm/s (display)
+        'vz_raw': vz_raw,     # Raw Z velocity in mm/s (FFT/RMS)
         'ts': ts,
         'rel_s': rel,
     }
@@ -409,6 +463,7 @@ def get_latest_sample() -> dict:
             return {}
         return {
             'az_ms2': _az_ms2_history[-1],
+            'vz_raw_mms': _vz_raw_mms_history[-1],
             'vz_mms': _vz_mms_history[-1],
             'unix_time': _ts_history[-1],
             'rate_hz': _actual_rate_hz,
@@ -489,6 +544,34 @@ def save_log(rpm: int, load_w: int, data: list) -> str:
         f'({len(data)} samples, VZ RMS={vz_rms:.4f} mm/s, rate={effective_rate_hz:.1f} Hz)'
     )
     return filepath
+
+
+# ---------------------------------------------------------------------------
+# Log discovery helpers
+# ---------------------------------------------------------------------------
+def get_latest_log_path():
+    if not os.path.isdir(LOG_DIR):
+        return None
+    files = [
+        os.path.join(LOG_DIR, f)
+        for f in os.listdir(LOG_DIR)
+        if f.lower().endswith('.csv')
+    ]
+    if not files:
+        return None
+    return max(files, key=os.path.getmtime)
+
+
+def get_all_log_paths():
+    if not os.path.isdir(LOG_DIR):
+        return []
+    files = [
+        os.path.join(LOG_DIR, f)
+        for f in os.listdir(LOG_DIR)
+        if f.lower().endswith('.csv')
+    ]
+    files.sort(key=os.path.getmtime, reverse=True)
+    return files
 
 
 # ---------------------------------------------------------------------------
