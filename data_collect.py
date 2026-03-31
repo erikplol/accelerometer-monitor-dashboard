@@ -6,6 +6,7 @@ import time
 from collections import deque
 
 import numpy as np
+import json
 
 try:
     from gpiozero import LED
@@ -19,18 +20,19 @@ from pymavlink import mavutil
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-DEFAULT_PORT = 'COM5' if os.name == 'nt' else '/dev/serial/by-id/usb-Hex_ProfiCNC_CubeOrange_2F003B000C51303231383439-if00'
+DEFAULT_PORT = 'COM5' if os.name == 'nt' else '/dev/serial/by-id/usb-Auterion_PX4_FMU_v6X.x_0-if00'
 PORT = os.getenv('MAVLINK_PORT', DEFAULT_PORT)
-BAUD = int(os.getenv('MAVLINK_BAUD', '921600'))
+BAUD = int(os.getenv('MAVLINK_BAUD', '1000000'))
 
-TARGET_IMU_RATE_HZ = int(os.getenv('MAVLINK_IMU_RATE_HZ', '100'))
+TARGET_IMU_RATE_HZ = int(os.getenv('MAVLINK_IMU_RATE_HZ', '200'))
 SAMPLING_RATE = float(TARGET_IMU_RATE_HZ)
 
 MAX_TIME_PTS = int(max(600, 60 * SAMPLING_RATE))
 
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+CALIB_FILE = os.getenv('MAVLINK_CALIB_FILE', os.path.join(LOG_DIR, 'gravity_calib.json'))
 
-# Thresholds for velocity RMS (mm/s) - ISO 10816 based
+# Thresholds for RMS (displayed as m/s²) - ISO 10816 based
 THRESH_GREEN  = 2.8    # below  → green  (good)
 THRESH_YELLOW = 7.1    # below  → yellow (acceptable), above → red (alarm)
 
@@ -176,9 +178,44 @@ class MAVLinkReader(threading.Thread):
         self._pause_event.set()
 
         # Calibration
-        self._gravity_offset = 0.0
-        self._calibrated = False
+        # Default offset (milli-G). We will try these in order:
+        # 1) env MAVLINK_FIXED_GRAVITY_OFFSET -> use and mark calibrated
+        # 2) calibration file (CALIB_FILE) -> load and mark calibrated
+        # 3) otherwise perform runtime calibration once (collect samples)
+        self._gravity_offset = -980.0
+        self._calibrated = True
         self._calibration_samples = []
+
+        # Env override (explicit fixed offset)
+        fixed_offset = os.getenv('MAVLINK_FIXED_GRAVITY_OFFSET')
+        if fixed_offset is not None:
+            try:
+                self._gravity_offset = float(fixed_offset)
+                self._calibrated = True
+            except Exception:
+                self._calibrated = False
+                self._calibration_samples = []
+        else:
+            # Try loading calibration file
+            try:
+                if os.path.exists(CALIB_FILE):
+                    with open(CALIB_FILE, 'r') as fh:
+                        data = json.load(fh)
+                    val = data.get('gravity_offset_mg')
+                    if val is not None:
+                        self._gravity_offset = float(val)
+                        self._calibrated = True
+                    else:
+                        self._calibrated = False
+                        self._calibration_samples = []
+                else:
+                    # No file -> perform runtime calibration
+                    self._calibrated = False
+                    self._calibration_samples = []
+            except Exception as exc:
+                print(f'[MAVLink] Warning: could not load calibration: {exc}')
+                self._calibrated = False
+                self._calibration_samples = []
 
         # Rate measurement
         self._msg_count = 0
@@ -231,15 +268,23 @@ class MAVLinkReader(threading.Thread):
         print(f'[MAVLink] Requested RAW_IMU at {self.target_rate_hz} Hz')
 
     def _calibrate_gravity(self, zacc_mg: float):
-        if self._calibrated:
-            return
+            if self._calibrated:
+                return
 
-        self._calibration_samples.append(zacc_mg)
+            self._calibration_samples.append(zacc_mg)
 
-        if len(self._calibration_samples) >= 50:
-            self._gravity_offset = np.median(self._calibration_samples)
-            self._calibrated = True
-            print(f'[MAVLink] Gravity calibrated: offset = {self._gravity_offset:.2f} mG')
+            if len(self._calibration_samples) >= 50:
+                self._gravity_offset = float(np.median(self._calibration_samples))
+                self._calibrated = True
+                print(f'[MAVLink] Gravity calibrated: offset = {self._gravity_offset:.2f} mG')
+                # Save calibration to file so future runs reuse it
+                try:
+                    os.makedirs(os.path.dirname(CALIB_FILE), exist_ok=True)
+                    with open(CALIB_FILE, 'w') as fh:
+                        json.dump({'gravity_offset_mg': self._gravity_offset, 'timestamp': time.time()}, fh)
+                    print(f'[MAVLink] Saved gravity calibration -> {CALIB_FILE}')
+                except Exception as exc:
+                    print(f'[MAVLink] Warning: could not save calibration: {exc}')
 
     def _update_rate_measurement(self, ts: float):
         global _actual_rate_hz
@@ -258,9 +303,10 @@ class MAVLinkReader(threading.Thread):
 
     def _reset_state(self):
         """Reset calibration and rate state for reconnection."""
-        self._gravity_offset = 0.0
-        self._calibrated = False
-        self._calibration_samples = []
+        # Preserve any loaded/fixed calibration across reconnects.
+        # If calibration hasn't completed, reset sample buffer so we can recalibrate.
+        if not self._calibrated:
+            self._calibration_samples = []
         self._rate_window_start = None
         self._rate_window_count = 0
         self._integrator.reset()
@@ -278,16 +324,16 @@ class MAVLinkReader(threading.Thread):
                 _connected = True
 
                 print(f'[MAVLink] Starting data collection')
-                print('[MAVLink] Calibrating gravity offset (keep device still)...')
+                if not self._calibrated:
+                    print('[MAVLink] Calibrating gravity offset (keep device still)...')
+                else:
+                    print(f'[MAVLink] Using fixed gravity offset: {self._gravity_offset:+.1f} mG')
 
                 while not self._stop_event.is_set():
                     self._pause_event.wait()
 
-                    msg = connection.recv_match(
-                        type='RAW_IMU',
-                        blocking=True,
-                        timeout=0.5,
-                    )
+                    # Accept multiple IMU message types (RAW_IMU in mG or HIGHRES_IMU in m/s^2)
+                    msg = connection.recv_match(blocking=True, timeout=0.5)
 
                     if msg is None:
                         continue
@@ -296,15 +342,40 @@ class MAVLinkReader(threading.Thread):
                     self._msg_count += 1
                     self._update_rate_measurement(ts)
 
-                    raw_zacc = msg.zacc  # in mG
-                    self._calibrate_gravity(raw_zacc)
+                    msg_type = msg.get_type()
 
-                    if self._calibrated:
-                        zacc_corrected = raw_zacc - self._gravity_offset
+                    if msg_type == 'RAW_IMU':
+                        # RAW_IMU: zacc is in mG
+                        raw_zacc_mg = msg.zacc
+
+                        # Calibrate using mG units (existing calibration expects mG)
+                        self._calibrate_gravity(raw_zacc_mg)
+
+                        if self._calibrated:
+                            zacc_corrected_mg = raw_zacc_mg - self._gravity_offset
+                        else:
+                            zacc_corrected_mg = raw_zacc_mg - 1000
+
+                        az_ms2 = zacc_corrected_mg * MG_TO_MS2
+
+                    elif msg_type == 'HIGHRES_IMU':
+                        # HIGHRES_IMU: zacc is in m/s^2 (SI units)
+                        raw_zacc_ms2 = msg.zacc
+
+                        # Convert to mG for calibration logic
+                        raw_zacc_mg = raw_zacc_ms2 / MG_TO_MS2
+                        self._calibrate_gravity(raw_zacc_mg)
+
+                        if self._calibrated:
+                            # gravity offset stored in mG -> convert to m/s^2
+                            az_ms2 = raw_zacc_ms2 - (self._gravity_offset * MG_TO_MS2)
+                        else:
+                            # assume ~1g offset until calibrated
+                            az_ms2 = raw_zacc_ms2 - 9.80665
+
                     else:
-                        zacc_corrected = raw_zacc - 1000
-
-                    az_ms2 = zacc_corrected * MG_TO_MS2
+                        # Not an IMU message we care about
+                        continue
 
                     # Integrate acceleration to velocity (mm/s)
                     vz_mms = self._integrator.update(az_ms2, ts)
@@ -345,7 +416,7 @@ class MAVLinkReader(threading.Thread):
 
                     if self._msg_count % 25 == 0:
                         print(
-                            f'az={az_ms2:+8.4f} m/s²  vz={vz_mms:+8.2f} mm/s  rate={_actual_rate_hz:.1f} Hz',
+                            f'az={az_ms2:+8.4f} m/s²  vz={vz_mms:+8.2f} m/s²  rate={_actual_rate_hz:.1f} Hz',
                             end='\r',
                         )
 
@@ -466,7 +537,7 @@ def save_log(rpm: int, load_w: int, data: list) -> str:
         writer.writerow(['# Samples', len(data)])
         writer.writerow(['# Target Rate (Hz)', TARGET_IMU_RATE_HZ])
         writer.writerow(['# Effective Rate (Hz)', f'{effective_rate_hz:.6f}'])
-        writer.writerow(['# VZ RMS (mm/s)', f'{vz_rms:.6f}'])
+        writer.writerow(['# AZ RMS (m/s²)', f'{vz_rms:.6f}'])
         writer.writerow([])
         writer.writerow([
             'counter',
@@ -486,7 +557,7 @@ def save_log(rpm: int, load_w: int, data: list) -> str:
 
     print(
         f'[Logger] Saved -> {filepath} '
-        f'({len(data)} samples, VZ RMS={vz_rms:.4f} mm/s, rate={effective_rate_hz:.1f} Hz)'
+        f'({len(data)} samples, AZ RMS={vz_rms:.4f} m/s², rate={effective_rate_hz:.1f} Hz)'
     )
     return filepath
 

@@ -78,8 +78,9 @@ app.title = "Engine Vibration Monitor"
 SAMPLING_RATE   = DC_SAMPLING_RATE
 UI_INTERVAL_MS  = 350   # UI refresh rate (ms) — decoupled from sampling rate
 MAX_DISPLAY_PTS = 500   # max points plotted per graph
-FFT_WINDOW_SECONDS = 5.0
-FFT_UPDATE_EVERY_N_INTERVALS = 3  # recompute FFT every ~1.05s with current interval
+FFT_WINDOW_SECONDS = 15.0
+# Recompute FFT every 30 seconds (number of UI intervals)
+FFT_UPDATE_EVERY_N_INTERVALS = max(1, int(30_000 / UI_INTERVAL_MS))
 
 _fft_cache_x = []
 _fft_cache_y = []
@@ -172,16 +173,16 @@ app.layout = html.Div([
     # ── Top strip: RMS | Freq | Severity | Logging ─────────────────────
     html.Div([
 
-        # RMS card (Velocity from integrated acceleration)
+        # RMS card (Acceleration Z shown instead of integrated velocity)
         html.Div([
-            html.Div("RMS VZ", style={**_LABEL, 'textAlign': 'center'}),
+            html.Div("RMS AZ", style={**_LABEL, 'textAlign': 'center'}),
             html.Div([
                 html.Span(id='rms-value', children='—', style={
                     'color': '#58a6ff',
                     'fontSize': '2.8rem', 'fontWeight': 300, 'lineHeight': 1,
                     'fontVariantNumeric': 'tabular-nums',
                 }),
-                html.Span(" mm/s", style={
+                html.Span(" m/s²", style={
                     'color': '#6e7681', 'fontSize': '0.9rem',
                     'marginLeft': 5, 'alignSelf': 'flex-end', 'paddingBottom': 3,
                 }),
@@ -210,24 +211,7 @@ app.layout = html.Div([
                   'borderTop': '2px solid #3fb950'},
            className='card-narrow'),
 
-        # FFT Sum card
-        html.Div([
-            html.Div("FFT Sum", style={**_LABEL, 'textAlign': 'center'}),
-            html.Div([
-                html.Span(id='fft-sum', children='—', style={
-                    'color': '#d29922',
-                    'fontSize': '2.8rem', 'fontWeight': 300, 'lineHeight': 1,
-                    'fontVariantNumeric': 'tabular-nums',
-                }),
-                html.Span(" mm/s", style={
-                    'color': '#6e7681', 'fontSize': '0.9rem',
-                    'marginLeft': 5, 'alignSelf': 'flex-end', 'paddingBottom': 3,
-                }),
-            ], style={'display': 'flex', 'alignItems': 'baseline', 'justifyContent': 'center'}),
-        ], style={**_CARD, 'flex': '0 0 160px', 'alignSelf': 'stretch',
-                  'display': 'flex', 'flexDirection': 'column', 'justifyContent': 'center', 'alignItems': 'center',
-                  'borderTop': '2px solid #d29922'},
-           className='card-narrow'),
+        
 
         # Traffic-light card
         html.Div([
@@ -356,9 +340,9 @@ app.layout = html.Div([
     # ── Graphs row ──────────────────────────────────────────────────────
     html.Div([
 
-        # Graph 1 – VZ vs time
+        # Graph 1 – AZ vs time
         html.Div([
-            html.Div("VZ · Real Time", style={**_LABEL, 'marginBottom': 4}),
+            html.Div("AZ · Real Time", style={**_LABEL, 'marginBottom': 4}),
             dcc.Graph(
                 id='vz-time-graph',
                 style={'flex': 1, 'minHeight': 0},
@@ -405,7 +389,7 @@ app.layout = html.Div([
 _YAXIS_VEL = dict(
     gridcolor=_GRID_CLR, color=_TICK_CLR, zeroline=True,
     zerolinecolor=_ZERO_CLR, zerolinewidth=1,
-    title=dict(text='mm/s', font=dict(size=10, color=_TICK_CLR)),
+    title=dict(text='m/s²', font=dict(size=10, color=_TICK_CLR)),
     tickfont=dict(size=10),
     showgrid=True,
 )
@@ -420,7 +404,6 @@ _YAXIS_VEL = dict(
      Output('fft-graph',     'figure'),
      Output('rms-value',     'children'),
      Output('recv-hz',       'children'),
-     Output('fft-sum',       'children'),
      Output('light-red',     'style'),
      Output('light-yellow',  'style'),
      Output('light-green',   'style'),
@@ -431,20 +414,20 @@ _YAXIS_VEL = dict(
 def update_dashboard(n):
     global _fft_cache_x, _fft_cache_y, _fft_cache_signature
 
-    h      = get_histories()
-    vz_all  = h.get('vz', [])             # Z velocity in mm/s (integrated)
+    h       = get_histories()
+    az_all  = h.get('az_ms2', [])         # Z acceleration in m/s^2
     rel_all = h['rel_s']
 
     # Downsample for display — keeps the browser responsive
-    if len(vz_all) > MAX_DISPLAY_PTS:
-        step = len(vz_all) // MAX_DISPLAY_PTS
-        vz_display = vz_all[::step]
+    if len(az_all) > MAX_DISPLAY_PTS:
+        step = len(az_all) // MAX_DISPLAY_PTS
+        az_display = az_all[::step]
         rel = rel_all[::step]
     else:
-        vz_display = vz_all
+        az_display = az_all
         rel = rel_all
 
-    VZ_COLOR    = '#58a6ff'
+    AZ_COLOR    = '#58a6ff'
     EMPTY_STYLE = {'color': '#f85149', 'fontSize': '0.82rem', 'marginLeft': 18}
     OK_STYLE    = {'color': '#3fb950', 'fontSize': '0.82rem', 'marginLeft': 18}
 
@@ -457,11 +440,11 @@ def update_dashboard(n):
         conn_label = '● Disconnected'
     conn_style = OK_STYLE if connected else EMPTY_STYLE
 
-    # ── Velocity RMS over last 1 second (mm/s) ─────────────────────────────
+    # ── Acceleration RMS over last 1 second (m/s²) ─────────────────────────
     n_1s = max(1, int(SAMPLING_RATE))
-    vz_window = vz_all[-n_1s:] if vz_all else []
-    if vz_window:
-        rms = float(np.sqrt(np.mean(np.array(vz_window) ** 2)))
+    az_window = az_all[-n_1s:] if az_all else []
+    if az_window:
+        rms = float(np.sqrt(np.mean(np.array(az_window) ** 2)))
         rms_label = f"{rms:.2f}"
     else:
         rms = 0.0
@@ -470,14 +453,11 @@ def update_dashboard(n):
     # ── Dominant frequency from FFT peak ────────────────────────────────
     # Calculate from cached FFT data instead of sensor register
     dominant_hz = 0.0
-    fft_sum = 0.0
     if _fft_cache_x and _fft_cache_y:
         peak_idx = int(np.argmax(_fft_cache_y))
         if peak_idx < len(_fft_cache_x):
             dominant_hz = _fft_cache_x[peak_idx]
-        fft_sum = sum(_fft_cache_y)
     hz_label = f"{dominant_hz:.1f}" if dominant_hz > 0 else "—"
-    fft_sum_label = f"{fft_sum:.2f}" if fft_sum > 0 else "—"
 
     # ── Traffic light ──────────────────────────────────────────────────
     is_red    = rms >= THRESH_YELLOW
@@ -488,7 +468,7 @@ def update_dashboard(n):
     style_yellow = _light_style(is_yellow, '#d29922', 'rgba(210,153,34,0.55)')
     style_green  = _light_style(is_green,  '#3fb950', 'rgba(63,185,80,0.55)')
 
-    # ── Graph 1: VZ vs time ────────────────────────────────────────────
+    # ── Graph 1: AZ vs time ────────────────────────────────────────────
     _xaxis_s = go.layout.XAxis(
         gridcolor=_GRID_CLR, color=_TICK_CLR, zeroline=False,
         title=go.layout.xaxis.Title(text='s', font=dict(size=10, color=_TICK_CLR)),
@@ -497,17 +477,17 @@ def update_dashboard(n):
     _yaxis_v = go.layout.YAxis(
         gridcolor=_GRID_CLR, color=_TICK_CLR, zeroline=True,
         zerolinecolor=_ZERO_CLR, zerolinewidth=1,
-        title=dict(text='mm/s', font=dict(size=10, color=_TICK_CLR)),
+        title=dict(text='m/s²', font=dict(size=10, color=_TICK_CLR)),
         tickfont=dict(size=10),
         showgrid=True,
     )
     time_fig = go.Figure(
         data=[
             go.Scattergl(
-                x=rel, y=vz_display,
-                mode='lines', line=dict(color=VZ_COLOR, width=1.5),
-                name='VZ',
-                hovertemplate='%{y:.2f} mm/s<extra></extra>',
+                x=rel, y=az_display,
+                mode='lines', line=dict(color=AZ_COLOR, width=1.5),
+                name='AZ',
+                hovertemplate='%{y:.2f} m/s²<extra></extra>',
             )
         ],
         layout=go.Layout(
@@ -518,11 +498,11 @@ def update_dashboard(n):
             xaxis=_xaxis_s,
             yaxis=_yaxis_v,
             showlegend=False,
-            uirevision='vz-time',
+            uirevision='az-time',
         ),
     )
 
-    # ── Graph 2: FFT (velocity spectrum in mm/s) ─────────────────────────
+    # ── Graph 2: FFT (spectrum, displayed as m/s²) ───────────────────────
 
     fft_traces = []
     fft_shapes = []
@@ -531,10 +511,14 @@ def update_dashboard(n):
     effective_rate = actual_rate if actual_rate > 0 else SAMPLING_RATE
     n_fft_window = max(64, int(effective_rate * FFT_WINDOW_SECONDS))
     should_update_fft = (n % FFT_UPDATE_EVERY_N_INTERVALS == 0)
-    if len(vz_all) >= n_fft_window and should_update_fft:
-        # FFT uses Z-axis velocity in mm/s
-        N = n_fft_window
-        segment = np.array(vz_all[-N:], dtype=float)
+
+    # Allow using available samples (down to a minimum FFT size) so FFT appears
+    # quickly instead of waiting for the full FFT_WINDOW_SECONDS worth of data.
+    available_N = len(az_all)
+    N = min(n_fft_window, available_N)
+    if N >= 64 and should_update_fft:
+        # FFT uses recent Z-axis acceleration (m/s²)
+        segment = np.array(az_all[-N:], dtype=float)
         segment = segment - segment.mean()
 
         window        = np.hanning(N)
@@ -552,16 +536,16 @@ def update_dashboard(n):
 
         _fft_cache_x = freqs.tolist()
         _fft_cache_y = fft_vals.tolist()
-        _fft_cache_signature = (len(vz_all), vz_all[-1], N)
+        _fft_cache_signature = (len(az_all), az_all[-1], N)
 
     if _fft_cache_signature is not None and _fft_cache_x:
         fft_traces.append(go.Scattergl(
             x=_fft_cache_x, y=_fft_cache_y,
             mode='lines', fill='tozeroy',
-            line=dict(color=VZ_COLOR, width=1.5),
+            line=dict(color=AZ_COLOR, width=1.5),
             fillcolor='rgba(88,166,255,0.15)',
             name='FFT',
-            hovertemplate='%{x:.2f} Hz  %{y:.3f} mm/s<extra></extra>',
+            hovertemplate='%{x:.2f} Hz  %{y:.3f} m/s²<extra></extra>',
         ))
 
     x_max = max(effective_rate / 2.0, (dominant_hz or 0) * 1.2, 5.0)
@@ -585,7 +569,7 @@ def update_dashboard(n):
             yaxis=go.layout.YAxis(
                 **{
                     **_YAXIS_VEL,
-                    'title': dict(text='mm/s', font=dict(size=10, color=_TICK_CLR)),
+                    'title': dict(text='m/s²', font=dict(size=10, color=_TICK_CLR)),
                     'rangemode': 'nonnegative',
                 },
             ),
@@ -595,7 +579,7 @@ def update_dashboard(n):
     )
 
     return (
-        time_fig, fft_fig, rms_label, hz_label, fft_sum_label,
+        time_fig, fft_fig, rms_label, hz_label,
         style_red, style_yellow, style_green,
         conn_label, conn_style,
     )

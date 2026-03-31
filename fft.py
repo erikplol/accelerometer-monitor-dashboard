@@ -4,9 +4,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 # ===== USER CONFIG =====
-FILE_PATH = "logs/vibration_RPM2000_LOAD5000W_20260311_233531 copy.csv"
-SIGNAL_COLUMN = "vz_mm_s"
-SAMPLING_FREQUENCY = 150  # Hz (match the sensor / poll rate used during logging)
+FILE_PATH = "logs/vibration_RPM0_LOAD0W_20260331_180007.csv"
+SIGNAL_COLUMN = "az_ms2"
+SAMPLING_FREQUENCY = 40  # Hz (match the sensor / poll rate used during logging)
 # =======================
 
 
@@ -15,7 +15,7 @@ def read_vibration_file(file_path):
 
     with open(file_path, "r", newline="") as handle:
         rows = [line for line in handle if not line.startswith("#") and line.strip()]
-
+q
     if not rows:
         return np.array(values)
 

@@ -19,7 +19,7 @@ LOG_DIR        = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs'
 
 # Fundamental at 8 Hz + 2nd harmonic (16 Hz) + 3rd harmonic (24 Hz), typical engine pattern
 _SIM_COMPS     = [(8.0, 5.0), (16.0, 2.5), (24.0, 1.0)]
-_SIM_NOISE_STD = 0.4   # mm/s white noise std-dev
+_SIM_NOISE_STD = 0.4   # m/s² white noise std-dev
 # HZZ drifts: dominant sine freq ± 2 Hz modulated at 0.03 Hz, plus per-sample jitter
 _SIM_HZZ_BASE  = 8.0   # Hz — centre of the reported sensor frequency
 
@@ -119,12 +119,12 @@ def save_log(rpm: int, load_w: int, data: list) -> str:
         writer.writerow(['# Load (W)',   load_w])
         writer.writerow(['# Timestamp',  timestamp])
         writer.writerow(['# Samples',    len(data)])
-        writer.writerow(['# RMS (mm/s)', f'{rms:.6f}'])
+        writer.writerow(['# RMS (m/s²)', f'{rms:.6f}'])
         writer.writerow([])
         writer.writerow(['counter', 'time', 'vz_mm_s'])
         for entry in data:
             writer.writerow([entry[0], entry[1], f'{entry[2]:.6f}'])
-    print(f'[SimLogger] Saved → {filepath}  ({len(data)} samples, RMS={rms:.4f} mm/s)')
+    print(f'[SimLogger] Saved → {filepath}  ({len(data)} samples, RMS={rms:.4f} m/s²)')
     return filepath
 
 # ── App setup ─────────────────────────────────────────────────────────────────
@@ -186,7 +186,7 @@ app.title = "Engine Vibration Monitor · Simulation"
 
 INTERVAL_MS = 1000.0 / SAMPLING_RATE
 
-# ISO 10816 vibration severity thresholds (mm/s RMS)
+# ISO 10816 vibration severity thresholds (m/s² RMS)
 THRESH_GREEN  = 2.8    # below  → green  (good)
 THRESH_YELLOW = 7.1    # below  → yellow (acceptable), above → red (alarm)
 
@@ -279,14 +279,14 @@ app.layout = html.Div([
 
         # RMS card
         html.Div([
-            html.Div("RMS Velocity", style={**_LABEL, 'textAlign': 'center'}),
+            html.Div("RMS AZ", style={**_LABEL, 'textAlign': 'center'}),
             html.Div([
                 html.Span(id='rms-value', children='—', style={
                     'color': '#58a6ff',
                     'fontSize': '2.8rem', 'fontWeight': 300, 'lineHeight': 1,
                     'fontVariantNumeric': 'tabular-nums',
                 }),
-                html.Span(" mm/s", style={
+                html.Span(" m/s²", style={
                     'color': '#6e7681', 'fontSize': '0.9rem',
                     'marginLeft': 5, 'alignSelf': 'flex-end', 'paddingBottom': 3,
                 }),
@@ -442,9 +442,9 @@ app.layout = html.Div([
     # ── Graphs row ──────────────────────────────────────────────────────
     html.Div([
 
-        # Graph 1 – VZ vs time
+        # Graph 1 – AZ vs time
         html.Div([
-            html.Div("Velocity · Real Time", style={**_LABEL, 'marginBottom': 4}),
+            html.Div("AZ · Real Time", style={**_LABEL, 'marginBottom': 4}),
             dcc.Graph(
                 id='vz-time-graph',
                 style={'flex': 1, 'minHeight': 0},
@@ -493,7 +493,7 @@ _YAXIS_VEL = dict(
     gridcolor=_GRID_CLR, color=_TICK_CLR, zeroline=True,
     zerolinecolor=_ZERO_CLR, zerolinewidth=1,
     rangemode='tozero',
-    title=dict(text='mm/s', font=dict(size=10, color=_TICK_CLR)),
+    title=dict(text='m/s²', font=dict(size=10, color=_TICK_CLR)),
     tickfont=dict(size=10),
     showgrid=True,
 )
@@ -568,8 +568,8 @@ def update_dashboard(n):
             go.Scatter(
                 x=rel, y=vz,
                 mode='lines', line=dict(color=VZ_COLOR, width=1.5),
-                name='VZ',
-                hovertemplate='%{y:.4f} mm/s<extra></extra>',
+                name='AZ',
+                hovertemplate='%{y:.4f} m/s²<extra></extra>',
             )
         ],
         layout=go.Layout(
@@ -605,7 +605,7 @@ def update_dashboard(n):
             line=dict(color=VZ_COLOR, width=1.5),
             fillcolor='rgba(88,166,255,0.15)',
             name='Spectrum',
-            hovertemplate='%{x:.2f} Hz · %{y:.4f} mm/s<extra></extra>',
+            hovertemplate='%{x:.2f} Hz · %{y:.4f} m/s²<extra></extra>',
         ))
     fft_fig = go.Figure(
         data=fft_traces,
@@ -678,9 +678,9 @@ def handle_logging(n_start, n_stop, rpm, load_w, log_data):
         w.writerow(['# RPM',        rpm_val])
         w.writerow(['# Load (W)',   load_val])
         w.writerow(['# Samples',    len(data)])
-        w.writerow(['# RMS (mm/s)', f'{rms:.6f}'])
+        w.writerow(['# RMS (m/s²)', f'{rms:.6f}'])
         w.writerow([])
-        w.writerow(['counter', 'time', 'vz_mm_s'])
+        w.writerow(['counter', 'time', 'az_m_s2'])
         for entry in data:
             w.writerow([entry[0], entry[1], f'{entry[2]:.6f}'])
 
