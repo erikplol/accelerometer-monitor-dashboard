@@ -1,12 +1,24 @@
+"""Dual-sensor data collection for the vibration dashboard.
+
+Data responsibilities:
+- Pixhawk (MAVLink): provides calibrated AZ acceleration in m/s² for FFT.
+- Witmotion (Modbus): provides VZ velocity in mm/s and HZZ in Hz.
+
+Logging rows intentionally pair Pixhawk AZ with the latest Witmotion VZ/HZZ.
+"""
+
 import argparse
 import csv
+import json
 import os
+import sys
 import threading
 import time
 from collections import deque
 
 import numpy as np
-import json
+import serial
+from serial import SerialException
 
 try:
     from gpiozero import LED
@@ -16,6 +28,9 @@ except (ImportError, RuntimeError):
     _GPIO_AVAILABLE = False
 
 from pymavlink import mavutil
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'vb01_python_sdk'))
+from vb01_python_sdk.device_model import DeviceModel
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -27,12 +42,29 @@ BAUD = int(os.getenv('MAVLINK_BAUD', '1000000'))
 TARGET_IMU_RATE_HZ = int(os.getenv('MAVLINK_IMU_RATE_HZ', '200'))
 SAMPLING_RATE = float(TARGET_IMU_RATE_HZ)
 
+DEFAULT_WITMOTION_PORT = 'COM6' if os.name == 'nt' else '/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0'
+WITMOTION_PORT = os.getenv('WTVB_PORT', DEFAULT_WITMOTION_PORT)
+WITMOTION_BAUD_CANDIDATES = [
+    int(part.strip())
+    for part in os.getenv('WTVB_BAUD_CANDIDATES', '115200,38400,9600').split(',')
+    if part.strip()
+]
+WITMOTION_MODBUS_ADDR = int(os.getenv('WTVB_MODBUS_ADDR', '0x50'), 0)
+WITMOTION_SENSOR_RATE_HZ = int(float(os.getenv('WTVB_SENSOR_RATE_HZ', '100')))
+WITMOTION_SERIAL_TIMEOUT = float(os.getenv('WTVB_SERIAL_TIMEOUT', '0.15'))
+
+REG_AZ = 0x36
+REG_VZ = 0x3C
+REG_HZZ = 0x46
+WITMOTION_FAST_START_REG = REG_AZ
+WITMOTION_FAST_REG_COUNT = 7
+
 MAX_TIME_PTS = int(max(600, 60 * SAMPLING_RATE))
 
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
 CALIB_FILE = os.getenv('MAVLINK_CALIB_FILE', os.path.join(LOG_DIR, 'gravity_calib.json'))
 
-# Thresholds for RMS (displayed as m/s²) - ISO 10816 based
+# Thresholds for VZ RMS (mm/s) - ISO 10816 based
 THRESH_GREEN  = 2.8    # below  → green  (good)
 THRESH_YELLOW = 7.1    # below  → yellow (acceptable), above → red (alarm)
 
@@ -65,20 +97,20 @@ def _set_gpio_lights(red: bool, yellow: bool, green: bool) -> None:
 # ArduPilot RAW_IMU sends mG (milli-G) for xacc/yacc/zacc
 MG_TO_MS2 = 9.80665 / 1000.0
 
-# High-pass filter cutoff for velocity integration (removes drift)
-# ~0.5 Hz cutoff is typical for machine vibration
-HP_CUTOFF_HZ = 0.5
-
 # ---------------------------------------------------------------------------
 # Shared data buffers
 # ---------------------------------------------------------------------------
-_az_ms2_history = deque(maxlen=MAX_TIME_PTS)  # Z acceleration in m/s^2 (for FFT)
-_vz_mms_history = deque(maxlen=MAX_TIME_PTS)  # Z velocity in mm/s (integrated)
+_az_ms2_history = deque(maxlen=MAX_TIME_PTS)  # Z acceleration in m/s² (for FFT)
+_wit_vz_mms_history = deque(maxlen=MAX_TIME_PTS)  # Witmotion VZ in mm/s
+_wit_hzz_history = deque(maxlen=MAX_TIME_PTS)     # Witmotion HZZ in Hz
 _ts_history = deque(maxlen=MAX_TIME_PTS)
 
 _lock = threading.Lock()
 _connected = False
 _actual_rate_hz = 0.0
+_wit_connected = False
+_wit_latest_vz_mms = 0.0
+_wit_latest_hzz_hz = 0.0
 
 # ---------------------------------------------------------------------------
 # Logging state
@@ -90,66 +122,189 @@ _log_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
-# High-pass filtered integrator for velocity
+# Witmotion Modbus helpers
 # ---------------------------------------------------------------------------
-class VelocityIntegrator:
-    """
-    Integrates acceleration to velocity with high-pass filtering.
+_crc_helper = DeviceModel.__new__(DeviceModel)
 
-    Uses a simple IIR high-pass filter to remove DC drift while
-    preserving oscillatory (vibration) components.
-    """
 
-    def __init__(self, sample_rate: float, cutoff_hz: float = 0.5):
-        self.sample_rate = sample_rate
-        self.cutoff_hz = cutoff_hz
+def _build_read_request(addr: int, reg: int, count: int) -> bytes:
+    frame = [addr, 0x03, reg >> 8, reg & 0xFF, count >> 8, count & 0xFF, 0x00, 0x00]
+    crc = _crc_helper.get_crc(frame, 6)
+    frame[6] = (crc >> 8) & 0xFF
+    frame[7] = crc & 0xFF
+    return bytes(frame)
 
-        # High-pass filter coefficient
-        # alpha = RC / (RC + dt), where RC = 1/(2*pi*fc)
-        dt = 1.0 / sample_rate
-        rc = 1.0 / (2.0 * np.pi * cutoff_hz)
-        self.alpha = rc / (rc + dt)
 
-        # State
-        self.velocity = 0.0
-        self.prev_velocity = 0.0
-        self.prev_accel = 0.0
-        self.last_time = None
+def _extract_valid_frame(buffer: bytes, addr: int, function_code: int, byte_count: int) -> bytes:
+    expected_len = byte_count + 5
+    for index in range(0, max(0, len(buffer) - expected_len + 1)):
+        if buffer[index] != addr:
+            continue
+        if buffer[index + 1] != function_code:
+            continue
+        if buffer[index + 2] != byte_count:
+            continue
+        candidate = buffer[index:index + expected_len]
+        crc_calc = _crc_helper.get_crc(list(candidate), len(candidate) - 2)
+        crc_recv = (candidate[-2] << 8) | candidate[-1]
+        if crc_calc == crc_recv:
+            return candidate
+    return b''
 
-    def update(self, accel_ms2: float, timestamp: float) -> float:
-        """
-        Update with new acceleration sample, return filtered velocity in mm/s.
-        """
-        if self.last_time is None:
-            self.last_time = timestamp
-            self.prev_accel = accel_ms2
-            return 0.0
 
-        dt = timestamp - self.last_time
-        dt = min(max(dt, 0.001), 0.1)  # Clamp to reasonable range
+def _parse_read_response(buffer: bytes, addr: int, start_reg: int, register_count: int) -> dict:
+    frame = _extract_valid_frame(buffer, addr, 0x03, 2 * register_count)
+    if not frame:
+        return {}
 
-        # Integrate acceleration to velocity (m/s)
-        # Using trapezoidal integration
-        delta_v = 0.5 * (accel_ms2 + self.prev_accel) * dt
-        raw_velocity = self.prev_velocity + delta_v
+    registers = {}
+    for offset in range(register_count):
+        raw_value = (frame[3 + 2 * offset] << 8) | frame[4 + 2 * offset]
+        registers[start_reg + offset] = raw_value
+    return registers
 
-        # High-pass filter to remove drift
-        # y[n] = alpha * (y[n-1] + x[n] - x[n-1])
-        self.velocity = self.alpha * (self.velocity + raw_velocity - self.prev_velocity)
 
-        # Update state
-        self.prev_velocity = raw_velocity
-        self.prev_accel = accel_ms2
-        self.last_time = timestamp
+def _decode_signed_u16(raw_value: int) -> int:
+    return raw_value - 65536 if raw_value >= 32768 else raw_value
 
-        # Return velocity in mm/s
-        return self.velocity * 1000.0
 
-    def reset(self):
-        self.velocity = 0.0
-        self.prev_velocity = 0.0
-        self.prev_accel = 0.0
-        self.last_time = None
+def _decode_vz_mm_s(raw_value: int) -> float:
+    # Register is centi-mm/s as a signed 16-bit value.
+    return float(_decode_signed_u16(raw_value)) / 100.0
+
+
+def _decode_hz(raw_value: int) -> float:
+    # Register is deci-Hz.
+    return float(_decode_signed_u16(raw_value)) / 10.0
+
+
+class WitmotionReader(threading.Thread):
+    """Polls Witmotion over Modbus and updates VZ/HZZ shared state."""
+
+    def __init__(
+        self,
+        port: str = WITMOTION_PORT,
+        baud_candidates=None,
+        modbus_addr: int = WITMOTION_MODBUS_ADDR,
+        sample_rate_hz: int = WITMOTION_SENSOR_RATE_HZ,
+    ):
+        super().__init__(daemon=True, name='WitmotionReader')
+        self.port = port
+        self.baud_candidates = list(baud_candidates or WITMOTION_BAUD_CANDIDATES)
+        self.modbus_addr = int(modbus_addr)
+        self.sample_rate_hz = int(sample_rate_hz)
+        self._stop_event = threading.Event()
+        self._pause_event = threading.Event()
+        self._pause_event.set()
+        self._current_baud = None
+
+    def _send_and_read_exact(self, ser: serial.Serial, request: bytes, expected_len: int) -> bytes:
+        ser.reset_input_buffer()
+        ser.write(request)
+        ser.flush()
+        return ser.read(expected_len)
+
+    def _probe_device(self, ser: serial.Serial) -> bool:
+        request = _build_read_request(self.modbus_addr, WITMOTION_FAST_START_REG, WITMOTION_FAST_REG_COUNT)
+        response = self._send_and_read_exact(ser, request, 5 + 2 * WITMOTION_FAST_REG_COUNT)
+        registers = _parse_read_response(response, self.modbus_addr, WITMOTION_FAST_START_REG, WITMOTION_FAST_REG_COUNT)
+        return REG_VZ in registers
+
+    def _open_serial(self) -> serial.Serial:
+        last_error = None
+        for baud in self.baud_candidates:
+            try:
+                ser = serial.Serial(
+                    self.port,
+                    baudrate=baud,
+                    timeout=WITMOTION_SERIAL_TIMEOUT,
+                    bytesize=8,
+                    parity='N',
+                    stopbits=1,
+                )
+                if self._probe_device(ser):
+                    self._current_baud = baud
+                    return ser
+                ser.close()
+            except SerialException as exc:
+                last_error = exc
+        raise last_error or SerialException(
+            f'Unable to communicate with Witmotion sensor on {self.port} '
+            f'using bauds {self.baud_candidates}'
+        )
+
+    def run(self):
+        global _wit_connected, _wit_latest_vz_mms, _wit_latest_hzz_hz
+
+        fast_request = _build_read_request(self.modbus_addr, WITMOTION_FAST_START_REG, WITMOTION_FAST_REG_COUNT)
+        fast_resp_len = 5 + 2 * WITMOTION_FAST_REG_COUNT
+        hzz_request = _build_read_request(self.modbus_addr, REG_HZZ, 1)
+        hzz_resp_len = 7
+
+        while not self._stop_event.is_set():
+            try:
+                with self._open_serial() as ser:
+                    _wit_connected = True
+                    print(f'[Witmotion] Connected -> {self.port} @ {self._current_baud} baud')
+                    cycle = 0
+
+                    while not self._stop_event.is_set():
+                        self._pause_event.wait()
+                        loop_started_at = time.perf_counter()
+
+                        fast_response = self._send_and_read_exact(ser, fast_request, fast_resp_len)
+                        registers = _parse_read_response(
+                            fast_response,
+                            self.modbus_addr,
+                            WITMOTION_FAST_START_REG,
+                            WITMOTION_FAST_REG_COUNT,
+                        )
+                        if not registers:
+                            continue
+
+                        if cycle % 10 == 0:
+                            hzz_response = self._send_and_read_exact(ser, hzz_request, hzz_resp_len)
+                            hzz_registers = _parse_read_response(hzz_response, self.modbus_addr, REG_HZZ, 1)
+                            if hzz_registers:
+                                _wit_latest_hzz_hz = _decode_hz(hzz_registers[REG_HZZ])
+
+                        ts = time.time()
+                        vz_mms = _decode_vz_mm_s(registers[REG_VZ])
+
+                        with _lock:
+                            _wit_latest_vz_mms = vz_mms
+                            _wit_vz_mms_history.append(vz_mms)
+                            _wit_hzz_history.append(_wit_latest_hzz_hz)
+
+                        cycle += 1
+                        elapsed = time.perf_counter() - loop_started_at
+                        sleep_time = (1.0 / self.sample_rate_hz) - elapsed
+                        if sleep_time > 0:
+                            time.sleep(sleep_time)
+
+            except SerialException as exc:
+                _wit_connected = False
+                print(f'\n[Witmotion] Serial error: {exc}')
+                if self._stop_event.wait(1.0):
+                    break
+            except Exception as exc:
+                _wit_connected = False
+                print(f'\n[Witmotion] Error: {exc}')
+                if self._stop_event.wait(1.0):
+                    break
+
+        _wit_connected = False
+        print('\n[Witmotion] Reader stopped.')
+
+    def pause(self):
+        self._pause_event.clear()
+
+    def resume(self):
+        self._pause_event.set()
+
+    def stop(self):
+        self._stop_event.set()
+        self._pause_event.set()
 
 
 # ---------------------------------------------------------------------------
@@ -159,8 +314,8 @@ class MAVLinkReader(threading.Thread):
     """
     Reads IMU data from ArduPilot via MAVLink.
 
-    - RAW_IMU: Z-axis acceleration for FFT analysis
-    - Integrates acceleration to velocity (mm/s) with high-pass filter
+    - RAW_IMU/HIGHRES_IMU: Z-axis acceleration used for FFT/logging.
+    - Does not compute velocity; VZ is sourced from Witmotion.
     """
 
     def __init__(
@@ -222,8 +377,6 @@ class MAVLinkReader(threading.Thread):
         self._rate_window_start = None
         self._rate_window_count = 0
 
-        # Velocity integrator
-        self._integrator = VelocityIntegrator(target_rate_hz, HP_CUTOFF_HZ)
 
     def _connect(self) -> mavutil.mavlink_connection:
         print(f'[MAVLink] Connecting to {self.port} @ {self.baud} baud...')
@@ -268,23 +421,24 @@ class MAVLinkReader(threading.Thread):
         print(f'[MAVLink] Requested RAW_IMU at {self.target_rate_hz} Hz')
 
     def _calibrate_gravity(self, zacc_mg: float):
-            if self._calibrated:
-                return
+        if self._calibrated:
+            return
 
-            self._calibration_samples.append(zacc_mg)
+        self._calibration_samples.append(zacc_mg)
+        if len(self._calibration_samples) < 50:
+            return
 
-            if len(self._calibration_samples) >= 50:
-                self._gravity_offset = float(np.median(self._calibration_samples))
-                self._calibrated = True
-                print(f'[MAVLink] Gravity calibrated: offset = {self._gravity_offset:.2f} mG')
-                # Save calibration to file so future runs reuse it
-                try:
-                    os.makedirs(os.path.dirname(CALIB_FILE), exist_ok=True)
-                    with open(CALIB_FILE, 'w') as fh:
-                        json.dump({'gravity_offset_mg': self._gravity_offset, 'timestamp': time.time()}, fh)
-                    print(f'[MAVLink] Saved gravity calibration -> {CALIB_FILE}')
-                except Exception as exc:
-                    print(f'[MAVLink] Warning: could not save calibration: {exc}')
+        self._gravity_offset = float(np.median(self._calibration_samples))
+        self._calibrated = True
+        print(f'[MAVLink] Gravity calibrated: offset = {self._gravity_offset:.2f} mG')
+        # Save calibration to file so future runs reuse it.
+        try:
+            os.makedirs(os.path.dirname(CALIB_FILE), exist_ok=True)
+            with open(CALIB_FILE, 'w') as fh:
+                json.dump({'gravity_offset_mg': self._gravity_offset, 'timestamp': time.time()}, fh)
+            print(f'[MAVLink] Saved gravity calibration -> {CALIB_FILE}')
+        except Exception as exc:
+            print(f'[MAVLink] Warning: could not save calibration: {exc}')
 
     def _update_rate_measurement(self, ts: float):
         global _actual_rate_hz
@@ -309,7 +463,6 @@ class MAVLinkReader(threading.Thread):
             self._calibration_samples = []
         self._rate_window_start = None
         self._rate_window_count = 0
-        self._integrator.reset()
 
     def run(self):
         global _connected, _actual_rate_hz
@@ -332,7 +485,7 @@ class MAVLinkReader(threading.Thread):
                 while not self._stop_event.is_set():
                     self._pause_event.wait()
 
-                    # Accept multiple IMU message types (RAW_IMU in mG or HIGHRES_IMU in m/s^2)
+                    # Accept multiple IMU message types (RAW_IMU in mG or HIGHRES_IMU in m/s²)
                     msg = connection.recv_match(blocking=True, timeout=0.5)
 
                     if msg is None:
@@ -359,7 +512,7 @@ class MAVLinkReader(threading.Thread):
                         az_ms2 = zacc_corrected_mg * MG_TO_MS2
 
                     elif msg_type == 'HIGHRES_IMU':
-                        # HIGHRES_IMU: zacc is in m/s^2 (SI units)
+                        # HIGHRES_IMU: zacc is in m/s² (SI units)
                         raw_zacc_ms2 = msg.zacc
 
                         # Convert to mG for calibration logic
@@ -367,7 +520,7 @@ class MAVLinkReader(threading.Thread):
                         self._calibrate_gravity(raw_zacc_mg)
 
                         if self._calibrated:
-                            # gravity offset stored in mG -> convert to m/s^2
+                            # gravity offset stored in mG -> convert to m/s²
                             az_ms2 = raw_zacc_ms2 - (self._gravity_offset * MG_TO_MS2)
                         else:
                             # assume ~1g offset until calibrated
@@ -377,26 +530,19 @@ class MAVLinkReader(threading.Thread):
                         # Not an IMU message we care about
                         continue
 
-                    # Integrate acceleration to velocity (mm/s)
-                    vz_mms = self._integrator.update(az_ms2, ts)
-
                     with _lock:
                         _az_ms2_history.append(az_ms2)
-                        _vz_mms_history.append(vz_mms)
                         _ts_history.append(ts)
+                        wit_vz_mms = _wit_latest_vz_mms
+                        wit_hzz_hz = _wit_latest_hzz_hz
                         
                         # Evaluate GPIO traffic lights every 25 samples (~0.25s at 100Hz)
                         if self._msg_count % 25 == 0:
-                            n_1s = max(1, int(self.target_rate_hz))
-                            if len(_vz_mms_history) >= n_1s:
-                                # Convert deque to list/array to calculate RMS
-                                # Take the last 1 second of data
-                                recent_vz = list(_vz_mms_history)[-n_1s:]
-                                rms = float(np.sqrt(np.mean(np.array(recent_vz) ** 2)))
-                                
-                                is_red    = rms >= THRESH_YELLOW
+                            rms = _get_vz_rms_last_1s()
+                            if rms > 0:
+                                is_red = rms >= THRESH_YELLOW
                                 is_yellow = THRESH_GREEN <= rms < THRESH_YELLOW
-                                is_green  = rms < THRESH_GREEN
+                                is_green = rms < THRESH_GREEN
                             else:
                                 is_red, is_yellow, is_green = False, False, False
                             
@@ -411,12 +557,13 @@ class MAVLinkReader(threading.Thread):
                                 'unix_time': ts,
                                 'iso_time': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts)),
                                 'az_ms2': az_ms2,
-                                'vz_mms': vz_mms,
+                                'vz_mms': wit_vz_mms,
+                                'hzz_hz': wit_hzz_hz,
                             })
 
                     if self._msg_count % 25 == 0:
                         print(
-                            f'az={az_ms2:+8.4f} m/s²  vz={vz_mms:+8.2f} m/s²  rate={_actual_rate_hz:.1f} Hz',
+                            f'az={az_ms2:+8.4f} m/s²  rate={_actual_rate_hz:.1f} Hz',
                             end='\r',
                         )
 
@@ -462,12 +609,14 @@ def get_histories() -> dict:
     """Get all history buffers for plotting/FFT."""
     with _lock:
         az_ms2 = list(_az_ms2_history)
-        vz_mms = list(_vz_mms_history)
+        vz_mms = list(_wit_vz_mms_history)
+        hzz_hz = list(_wit_hzz_history)
         ts = list(_ts_history)
     rel = [stamp - ts[0] for stamp in ts] if ts else []
     return {
-        'az_ms2': az_ms2,    # Z acceleration in m/s^2 (for FFT)
-        'vz': vz_mms,        # Z velocity in mm/s (for display/RMS)
+        'az_ms2': az_ms2,    # Z acceleration in m/s² (for FFT)
+        'vz_mms': vz_mms,    # Witmotion Z velocity in mm/s (for display/RMS)
+        'hzz_hz': hzz_hz,
         'ts': ts,
         'rel_s': rel,
     }
@@ -480,7 +629,8 @@ def get_latest_sample() -> dict:
             return {}
         return {
             'az_ms2': _az_ms2_history[-1],
-            'vz_mms': _vz_mms_history[-1],
+            'vz_mms': _wit_latest_vz_mms,
+            'hzz_hz': _wit_latest_hzz_hz,
             'unix_time': _ts_history[-1],
             'rate_hz': _actual_rate_hz,
         }
@@ -494,7 +644,21 @@ def is_connected() -> bool:
     return _connected
 
 
+def is_witmotion_connected() -> bool:
+    return _wit_connected
+
+
+def _get_vz_rms_last_1s() -> float:
+    """Return VZ RMS over the latest ~1 second of Witmotion data."""
+    n_1s = max(1, int(WITMOTION_SENSOR_RATE_HZ))
+    if len(_wit_vz_mms_history) < n_1s:
+        return 0.0
+    recent_vz = list(_wit_vz_mms_history)[-n_1s:]
+    return float(np.sqrt(np.mean(np.array(recent_vz) ** 2)))
+
+
 def start_logging() -> None:
+    """Start capturing combined AZ/VZ samples into an in-memory log buffer."""
     global _log_active, _log_buffer, _log_counter
     with _log_lock:
         _log_active = True
@@ -503,6 +667,7 @@ def start_logging() -> None:
 
 
 def stop_logging() -> list:
+    """Stop logging and return a snapshot of buffered rows."""
     global _log_active
     with _log_lock:
         _log_active = False
@@ -511,14 +676,16 @@ def stop_logging() -> list:
 
 
 def save_log(rpm: int, load_w: int, data: list) -> str:
-    """Save logged data to CSV file."""
+    """Save combined Pixhawk/Witmotion rows to a CSV file."""
     os.makedirs(LOG_DIR, exist_ok=True)
     timestamp = time.strftime('%Y%m%d_%H%M%S')
     filename = f'vibration_RPM{rpm}_LOAD{load_w}W_{timestamp}.csv'
     filepath = os.path.join(LOG_DIR, filename)
 
+    az_vals = [row['az_ms2'] for row in data] if data else []
     vz_vals = [row['vz_mms'] for row in data] if data else []
     timestamps = [row['unix_time'] for row in data] if data else []
+    az_rms = float(np.sqrt(np.mean(np.square(az_vals)))) if az_vals else 0.0
     vz_rms = float(np.sqrt(np.mean(np.square(vz_vals)))) if vz_vals else 0.0
 
     effective_rate_hz = SAMPLING_RATE
@@ -530,14 +697,15 @@ def save_log(rpm: int, load_w: int, data: list) -> str:
 
     with open(filepath, 'w', newline='') as handle:
         writer = csv.writer(handle)
-        writer.writerow(['# Engine Vibration Log (MAVLink IMU)'])
+        writer.writerow(['# Engine Vibration Log (Pixhawk AZ + Witmotion VZ)'])
         writer.writerow(['# RPM', rpm])
         writer.writerow(['# Load (W)', load_w])
         writer.writerow(['# Timestamp', timestamp])
         writer.writerow(['# Samples', len(data)])
         writer.writerow(['# Target Rate (Hz)', TARGET_IMU_RATE_HZ])
         writer.writerow(['# Effective Rate (Hz)', f'{effective_rate_hz:.6f}'])
-        writer.writerow(['# AZ RMS (m/s²)', f'{vz_rms:.6f}'])
+        writer.writerow(['# AZ RMS (m/s²)', f'{az_rms:.6f}'])
+        writer.writerow(['# VZ RMS (mm/s)', f'{vz_rms:.6f}'])
         writer.writerow([])
         writer.writerow([
             'counter',
@@ -545,6 +713,7 @@ def save_log(rpm: int, load_w: int, data: list) -> str:
             'iso_time',
             'az_ms2',
             'vz_mms',
+            'hzz_hz',
         ])
         for row in data:
             writer.writerow([
@@ -553,11 +722,13 @@ def save_log(rpm: int, load_w: int, data: list) -> str:
                 row['iso_time'],
                 f"{row['az_ms2']:.6f}",
                 f"{row['vz_mms']:.6f}",
+                f"{row.get('hzz_hz', 0.0):.6f}",
             ])
 
     print(
         f'[Logger] Saved -> {filepath} '
-        f'({len(data)} samples, AZ RMS={vz_rms:.4f} m/s², rate={effective_rate_hz:.1f} Hz)'
+        f'({len(data)} samples, AZ RMS={az_rms:.4f} m/s², VZ RMS={vz_rms:.4f} mm/s, '
+        f'rate={effective_rate_hz:.1f} Hz)'
     )
     return filepath
 
@@ -578,18 +749,20 @@ def main():
     parser.add_argument('--log', action='store_true', help='Save CSV log')
     args = parser.parse_args()
 
-    reader = MAVLinkReader(
+    mav_reader = MAVLinkReader(
         port=args.port,
         baud=args.baud,
         target_rate_hz=args.rate,
     )
+    wit_reader = WitmotionReader()
 
     if args.log:
         start_logging()
 
-    reader.start()
+    mav_reader.start()
+    wit_reader.start()
     started_at = time.time()
-    print('Collecting IMU data. Press Ctrl+C to stop.')
+    print('Collecting data (Pixhawk AZ + Witmotion VZ). Press Ctrl+C to stop.')
 
     try:
         while True:
@@ -606,8 +779,10 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        reader.stop()
-        reader.join(timeout=2.0)
+        mav_reader.stop()
+        wit_reader.stop()
+        mav_reader.join(timeout=2.0)
+        wit_reader.join(timeout=2.0)
 
     if args.log:
         data = stop_logging()

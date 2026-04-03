@@ -2,5 +2,4 @@ dash
 plotly
 numpy
 pyserial
-matplotlib
 pymavlink

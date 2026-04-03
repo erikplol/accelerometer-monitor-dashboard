@@ -91,7 +91,7 @@ Each file contains a metadata header (RPM, Load, timestamp, sample count, RMS) f
 
 ## Configuration
 
-Edit the top of `data_collect.py`:
+Edit the top of `collector/data_collect.py`:
 
 | Variable        | Default | Description                        |
 |-----------------|---------|------------------------------------|
