@@ -18,6 +18,7 @@ from data_collect.data_collect import (
     start_logging,
     stop_logging,
 )
+from dashboard.fft import refresh_fft_cache
 from dashboard.theme import CARD_BG, GRID_CLR, TICK_CLR, YAXIS_VEL, ZERO_CLR, light_style
 
 
@@ -155,30 +156,14 @@ def register_callbacks(
         fft_traces = []
 
         effective_rate = actual_rate if actual_rate > 0 else sampling_rate
-        n_fft_window = max(64, int(effective_rate * fft_window_seconds))
         should_update_fft = (n % fft_update_every_n_intervals == 0)
-
-        available_n = len(az_all)
-        N = min(n_fft_window, available_n)
-        if N >= 64 and should_update_fft:
-            segment = np.array(az_all[-N:], dtype=float)
-            segment = segment - segment.mean()
-
-            window = np.hanning(N)
-            coherent_gain = float(window.mean()) if N > 0 else 1.0
-            spectrum = np.fft.rfft(segment * window)
-            fft_vals = np.abs(spectrum) / (N * coherent_gain)
-            freqs = np.fft.rfftfreq(N, d=1.0 / effective_rate)
-
-            if len(fft_vals) > 2:
-                fft_vals[1:-1] *= 2.0
-
-            freqs = freqs[1:]
-            fft_vals = fft_vals[1:]
-
-            fft_cache['x'] = freqs.tolist()
-            fft_cache['y'] = fft_vals.tolist()
-            fft_cache['sig'] = (len(az_all), az_all[-1], N)
+        refresh_fft_cache(
+            fft_cache,
+            az_all,
+            effective_rate,
+            fft_window_seconds,
+            should_update_fft,
+        )
 
         if fft_cache['sig'] is not None and fft_cache['x']:
             fft_traces.append(go.Scattergl(
