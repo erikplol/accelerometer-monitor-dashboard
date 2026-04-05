@@ -26,6 +26,9 @@ accelerometer-monitor-dashboard/
 ├── setup_proxy.sh
 ├── requirements.txt
 ├── README.md
+├── calibration/
+│   ├── pixhawk_calib.txt
+│   └── wtb_calib.txt
 ├── dashboard/
 │   ├── layout.py
 │   ├── callbacks.py
@@ -58,6 +61,8 @@ accelerometer-monitor-dashboard/
 - `data_collect/data_collect.py`: Public API and CLI wrapper around readers + logging utilities.
 - `data_collect/vb01_python_sdk/device_model.py`: Vendor SDK helper for low-level Modbus operations.
 - `data_collect/vb01_python_sdk/test.py`: Standalone SDK usage example script.
+- `calibration/pixhawk_calib.txt`: Plain-text Pixhawk gravity offset in mG (single float value).
+- `calibration/wtb_calib.txt`: Plain-text Witmotion VZ scale multiplier (single float value).
 - `logs/`: Saved CSV logs.
 
 ## Function Reference
@@ -255,5 +260,5 @@ Key variables:
 - `WTVB_MODBUS_ADDR`
 - `WTVB_SENSOR_RATE_HZ`
 - `WTVB_SERIAL_TIMEOUT`
-- `WTVB_CALIB_FILE` (default `wtb_calib.txt`; plain-text multiplier for decoded Witmotion VZ values)
-- `MAVLINK_CALIB_FILE` (default `pixhawk_calib.txt`; plain-text gravity offset in mG)
+- `WTVB_CALIB_FILE` (default `calibration/wtb_calib.txt`; plain-text multiplier for decoded Witmotion VZ values)
+- `MAVLINK_CALIB_FILE` (default `calibration/pixhawk_calib.txt`; plain-text gravity offset in mG)
