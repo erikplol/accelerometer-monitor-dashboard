@@ -11,7 +11,7 @@ from serial import SerialException
 from data_collect import state
 
 sys.path.insert(0, os.path.join(state.BASE_DIR, 'vb01_python_sdk'))
-from vb01_python_sdk.device_model import DeviceModel
+from data_collect.vb01_python_sdk.device_model import DeviceModel
 
 _crc_helper = DeviceModel.__new__(DeviceModel)
 

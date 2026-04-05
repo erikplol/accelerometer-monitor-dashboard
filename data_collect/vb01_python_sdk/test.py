@@ -1,6 +1,6 @@
 import time
 
-import device_model
+import data_collect.vb01_python_sdk.device_model as device_model
 
 """
     WTVB01-485 example
