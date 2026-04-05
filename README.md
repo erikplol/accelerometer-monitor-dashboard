@@ -29,10 +29,12 @@ accelerometer-monitor-dashboard/
 ├── dashboard/
 │   ├── layout.py
 │   ├── callbacks.py
+│   ├── fft.py
 │   └── theme.py
 ├── data_collect/
 │   ├── __init__.py
 │   ├── state.py
+│   ├── gpio.py
 │   ├── data_collect.py
 │   ├── pixhawk.py
 │   ├── witmotion.py
@@ -47,8 +49,10 @@ accelerometer-monitor-dashboard/
 - `app.py`: App entry point. Builds Dash app, starts reader threads, injects layout, registers callbacks.
 - `dashboard/layout.py`: UI component tree factory.
 - `dashboard/callbacks.py`: Runtime behavior (graph refresh, logging controls, playback pause, downloads).
+- `dashboard/fft.py`: FFT computation and refresh helpers for AZ spectrum data.
 - `dashboard/theme.py`: Shared colors/styles and the custom HTML index template.
 - `data_collect/state.py`: Shared runtime buffers/config/constants used by both sensor threads.
+- `data_collect/gpio.py`: GPIO LED control helpers for red/yellow/green status lamps.
 - `data_collect/pixhawk.py`: Pixhawk MAVLink reader thread.
 - `data_collect/witmotion.py`: Witmotion Modbus reader thread.
 - `data_collect/data_collect.py`: Public API and CLI wrapper around readers + logging utilities.
@@ -79,6 +83,11 @@ This section summarizes each function/method in the repository.
 - `download_all_logs(n_clicks)`: Creates an in-memory ZIP of all CSV logs and sends it to browser.
 - `write_zip(buff)`: Nested helper inside `download_all_logs` that writes log files into ZIP buffer.
 
+### `dashboard/fft.py`
+
+- `compute_az_fft(az_values, effective_rate, fft_window_seconds)`: Computes single-sided AZ FFT arrays and returns frequency/amplitude lists plus sample count.
+- `refresh_fft_cache(fft_cache, az_values, effective_rate, fft_window_seconds, should_update)`: Refreshes the dashboard FFT cache in place when an update is due.
+
 ### `data_collect/data_collect.py`
 
 - `get_histories()`: Returns copies of buffered histories for AZ, VZ, HZZ, absolute timestamps, and relative seconds.
@@ -93,8 +102,11 @@ This section summarizes each function/method in the repository.
 
 ### `data_collect/state.py`
 
-- `set_gpio_lights(red, yellow, green)`: Sets GPIO traffic light LEDs when gpiozero is available.
 - `get_vz_rms_last_1s()`: Computes RMS of most recent ~1 second VZ samples.
+
+### `data_collect/gpio.py`
+
+- `set_gpio_lights(red, yellow, green)`: Sets GPIO traffic light LEDs when gpiozero is available.
 
 ### `data_collect/pixhawk.py` (`MAVLinkReader`)
 

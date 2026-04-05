@@ -10,6 +10,7 @@ import numpy as np
 from pymavlink import mavutil
 
 from data_collect import state
+from data_collect.gpio import set_gpio_lights
 
 
 class MAVLinkReader(threading.Thread):
@@ -212,7 +213,7 @@ class MAVLinkReader(threading.Thread):
                             else:
                                 is_red, is_yellow, is_green = False, False, False
 
-                            state.set_gpio_lights(is_red, is_yellow, is_green)
+                            set_gpio_lights(is_red, is_yellow, is_green)
 
                     with state._log_lock:
                         if state._log_active:
