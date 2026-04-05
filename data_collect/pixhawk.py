@@ -1,6 +1,5 @@
 """Pixhawk MAVLink reader implementation."""
 
-import json
 import os
 import threading
 import time
@@ -46,14 +45,8 @@ class MAVLinkReader(threading.Thread):
             try:
                 if os.path.exists(state.CALIB_FILE):
                     with open(state.CALIB_FILE, 'r') as fh:
-                        data = json.load(fh)
-                    val = data.get('gravity_offset_mg')
-                    if val is not None:
-                        self._gravity_offset = float(val)
-                        self._calibrated = True
-                    else:
-                        self._calibrated = False
-                        self._calibration_samples = []
+                        self._gravity_offset = float(fh.read().strip())
+                    self._calibrated = True
                 else:
                     self._calibrated = False
                     self._calibration_samples = []
@@ -122,9 +115,11 @@ class MAVLinkReader(threading.Thread):
         self._calibrated = True
         print(f'[MAVLink] Gravity calibrated: offset = {self._gravity_offset:.2f} mG')
         try:
-            os.makedirs(os.path.dirname(state.CALIB_FILE), exist_ok=True)
+            calib_dir = os.path.dirname(state.CALIB_FILE)
+            if calib_dir:
+                os.makedirs(calib_dir, exist_ok=True)
             with open(state.CALIB_FILE, 'w') as fh:
-                json.dump({'gravity_offset_mg': self._gravity_offset, 'timestamp': time.time()}, fh)
+                fh.write(f'{self._gravity_offset:.6f}\n')
             print(f'[MAVLink] Saved gravity calibration -> {state.CALIB_FILE}')
         except Exception as exc:
             print(f'[MAVLink] Warning: could not save calibration: {exc}')

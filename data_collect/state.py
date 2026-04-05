@@ -26,6 +26,7 @@ WITMOTION_BAUD_CANDIDATES = [
 WITMOTION_MODBUS_ADDR = int(os.getenv('WTVB_MODBUS_ADDR', '0x50'), 0)
 WITMOTION_SENSOR_RATE_HZ = int(float(os.getenv('WTVB_SENSOR_RATE_HZ', '100')))
 WITMOTION_SERIAL_TIMEOUT = float(os.getenv('WTVB_SERIAL_TIMEOUT', '0.15'))
+WITMOTION_CALIB_FILE = os.getenv('WTVB_CALIB_FILE', 'calibration/wtb_calib.txt')
 
 # Witmotion register map
 REG_AZ = 0x36
@@ -36,8 +37,21 @@ WITMOTION_FAST_REG_COUNT = 7
 
 MAX_TIME_PTS = int(max(600, 60 * SAMPLING_RATE))
 
-LOG_DIR = os.path.join(BASE_DIR, 'logs')
-CALIB_FILE = os.getenv('MAVLINK_CALIB_FILE', os.path.join(LOG_DIR, 'gravity_calib.json'))
+CALIB_FILE = os.getenv('MAVLINK_CALIB_FILE', 'calibration/pixhawk_calib.txt')
+
+
+def _load_witmotion_scale() -> float:
+    """Load Witmotion VZ scale from a plain text file (single float value)."""
+    try:
+        if os.path.exists(WITMOTION_CALIB_FILE):
+            with open(WITMOTION_CALIB_FILE, 'r') as handle:
+                return float(handle.read().strip())
+    except Exception as exc:
+        print(f'[Witmotion] Warning: could not load calibration from {WITMOTION_CALIB_FILE}: {exc}')
+    return 1.0
+
+
+WITMOTION_VZ_SCALE = _load_witmotion_scale()
 
 THRESH_GREEN = 2.8
 THRESH_YELLOW = 7.1

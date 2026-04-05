@@ -58,7 +58,7 @@ accelerometer-monitor-dashboard/
 - `data_collect/data_collect.py`: Public API and CLI wrapper around readers + logging utilities.
 - `data_collect/vb01_python_sdk/device_model.py`: Vendor SDK helper for low-level Modbus operations.
 - `data_collect/vb01_python_sdk/test.py`: Standalone SDK usage example script.
-- `logs/`: Saved CSV logs and calibration JSON.
+- `logs/`: Saved CSV logs.
 
 ## Function Reference
 
@@ -255,3 +255,5 @@ Key variables:
 - `WTVB_MODBUS_ADDR`
 - `WTVB_SENSOR_RATE_HZ`
 - `WTVB_SERIAL_TIMEOUT`
+- `WTVB_CALIB_FILE` (default `wtb_calib.txt`; plain-text multiplier for decoded Witmotion VZ values)
+- `MAVLINK_CALIB_FILE` (default `pixhawk_calib.txt`; plain-text gravity offset in mG)

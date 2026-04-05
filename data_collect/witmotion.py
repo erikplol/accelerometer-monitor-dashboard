@@ -58,7 +58,8 @@ def _decode_signed_u16(raw_value: int) -> int:
 
 
 def _decode_vz_mm_s(raw_value: int) -> float:
-    return float(_decode_signed_u16(raw_value)) / 100.0
+    base_vz_mms = float(_decode_signed_u16(raw_value)) / 100.0
+    return base_vz_mms * state.WITMOTION_VZ_SCALE
 
 
 def _decode_hz(raw_value: int) -> float:
