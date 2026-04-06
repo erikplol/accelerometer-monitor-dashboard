@@ -53,17 +53,13 @@ def _parse_read_response(buffer: bytes, addr: int, start_reg: int, register_coun
     return registers
 
 
-def _decode_signed_u16(raw_value: int) -> int:
-    return raw_value - 65536 if raw_value >= 32768 else raw_value
-
-
 def _decode_vz_mm_s(raw_value: int) -> float:
-    base_vz_mms = float(_decode_signed_u16(raw_value)) / 100.0
+    base_vz_mms = float(raw_value) / 100.0
     return base_vz_mms * state.WITMOTION_VZ_SCALE
 
 
 def _decode_hz(raw_value: int) -> float:
-    return float(_decode_signed_u16(raw_value)) / 10.0
+    return float(raw_value) / 10.0
 
 
 class WitmotionReader(threading.Thread):
@@ -86,16 +82,56 @@ class WitmotionReader(threading.Thread):
         self._pause_event.set()
         self._current_baud = None
 
-    def _send_and_read_exact(self, ser: serial.Serial, request: bytes, expected_len: int) -> bytes:
-        ser.reset_input_buffer()
+    def _query_registers(
+        self,
+        ser: serial.Serial,
+        request: bytes,
+        start_reg: int,
+        register_count: int,
+        max_wait_s: float = 0.04,
+    ) -> dict:
+        """Issue one Modbus read request and parse the first valid frame quickly."""
+        expected_len = 5 + (2 * register_count)
+        deadline = time.perf_counter() + max_wait_s
+        buffer = bytearray()
+
         ser.write(request)
         ser.flush()
-        return ser.read(expected_len)
+
+        while time.perf_counter() < deadline:
+            waiting = ser.in_waiting if hasattr(ser, 'in_waiting') else 0
+            if waiting > 0:
+                chunk = ser.read(waiting)
+            else:
+                # Read at least one byte so fragmented replies are reconstructed.
+                need = max(1, expected_len - len(buffer))
+                chunk = ser.read(need)
+
+            if chunk:
+                buffer.extend(chunk)
+                registers = _parse_read_response(
+                    bytes(buffer),
+                    self.modbus_addr,
+                    start_reg,
+                    register_count,
+                )
+                if registers:
+                    return registers
+            else:
+                # Keep loop responsive while waiting for serial bytes.
+                time.sleep(0.001)
+
+        return {}
 
     def _probe_device(self, ser: serial.Serial) -> bool:
         request = _build_read_request(self.modbus_addr, state.WITMOTION_FAST_START_REG, state.WITMOTION_FAST_REG_COUNT)
-        response = self._send_and_read_exact(ser, request, 5 + 2 * state.WITMOTION_FAST_REG_COUNT)
-        registers = _parse_read_response(response, self.modbus_addr, state.WITMOTION_FAST_START_REG, state.WITMOTION_FAST_REG_COUNT)
+        registers = self._query_registers(
+            ser,
+            request,
+            state.WITMOTION_FAST_START_REG,
+            state.WITMOTION_FAST_REG_COUNT,
+            max_wait_s=min(0.2, max(0.04, state.WITMOTION_SERIAL_TIMEOUT)),
+        )
         return state.REG_VZ in registers
 
     def _open_serial(self) -> serial.Serial:
@@ -123,9 +159,7 @@ class WitmotionReader(threading.Thread):
 
     def run(self):
         fast_request = _build_read_request(self.modbus_addr, state.WITMOTION_FAST_START_REG, state.WITMOTION_FAST_REG_COUNT)
-        fast_resp_len = 5 + 2 * state.WITMOTION_FAST_REG_COUNT
         hzz_request = _build_read_request(self.modbus_addr, state.REG_HZZ, 1)
-        hzz_resp_len = 7
 
         while not self._stop_event.is_set():
             try:
@@ -138,19 +172,24 @@ class WitmotionReader(threading.Thread):
                         self._pause_event.wait()
                         loop_started_at = time.perf_counter()
 
-                        fast_response = self._send_and_read_exact(ser, fast_request, fast_resp_len)
-                        registers = _parse_read_response(
-                            fast_response,
-                            self.modbus_addr,
+                        registers = self._query_registers(
+                            ser,
+                            fast_request,
                             state.WITMOTION_FAST_START_REG,
                             state.WITMOTION_FAST_REG_COUNT,
+                            max_wait_s=0.03,
                         )
                         if not registers:
                             continue
 
                         if cycle % 10 == 0:
-                            hzz_response = self._send_and_read_exact(ser, hzz_request, hzz_resp_len)
-                            hzz_registers = _parse_read_response(hzz_response, self.modbus_addr, state.REG_HZZ, 1)
+                            hzz_registers = self._query_registers(
+                                ser,
+                                hzz_request,
+                                state.REG_HZZ,
+                                1,
+                                max_wait_s=0.03,
+                            )
                             if hzz_registers:
                                 state._wit_latest_hzz_hz = _decode_hz(hzz_registers[state.REG_HZZ])
 
@@ -161,6 +200,7 @@ class WitmotionReader(threading.Thread):
                             state._wit_latest_vz_mms = vz_mms
                             state._wit_vz_mms_history.append(vz_mms)
                             state._wit_hzz_history.append(state._wit_latest_hzz_hz)
+                            state._wit_ts_history.append(ts)
 
                         cycle += 1
                         elapsed = time.perf_counter() - loop_started_at

@@ -33,7 +33,8 @@ def register_callbacks(
     thresh_green,
     thresh_yellow,
 ):
-    fft_update_every_n_intervals = max(1, int(30_000 / ui_interval_ms))
+    # Refresh FFT every ~15 seconds.
+    fft_update_every_n_intervals = max(1, int(15_000 / ui_interval_ms))
     fft_cache = {'x': [], 'y': [], 'sig': None}
     log_duration_s = 30
 
@@ -43,6 +44,7 @@ def register_callbacks(
          Output('rms-value', 'children'),
          Output('az-rms-value', 'children'),
          Output('recv-hz', 'children'),
+         Output('dominant-fft-hz', 'children'),
          Output('light-red', 'style'),
          Output('light-yellow', 'style'),
          Output('light-green', 'style'),
@@ -53,16 +55,23 @@ def register_callbacks(
     )
     def update_dashboard(n, playback_data):
         if (playback_data or {}).get('paused', False):
-            return tuple([dash.no_update] * 10)
+            return tuple([dash.no_update] * 11)
 
         h = get_histories()
         az_all = h.get('az_ms2', [])
         vz_all = h.get('vz_mms', [])
         hzz_all = h.get('hzz_hz', [])
-        rel_all = h['rel_s']
+        rel_all = h.get('wit_rel_s', [])
+
+        # Keep VZ signal and x-axis lengths aligned to avoid stale-looking traces.
+        if rel_all and len(rel_all) != len(vz_all):
+            n = min(len(rel_all), len(vz_all))
+            rel_all = rel_all[-n:]
+            vz_all = vz_all[-n:]
+            hzz_all = hzz_all[-n:] if len(hzz_all) >= n else hzz_all
 
         if len(vz_all) > max_display_pts:
-            step = len(vz_all) // max_display_pts
+            step = max(1, len(vz_all) // max_display_pts)
             vz_display = vz_all[::step]
             rel = rel_all[::step]
         else:
@@ -104,6 +113,7 @@ def register_callbacks(
             az_rms_label = '-'
 
         hzz_label = f'{hzz_all[-1]:.1f}' if hzz_all else '-'
+        dominant_fft_hz_label = '-'
 
         is_red = vz_rms >= thresh_yellow
         is_yellow = thresh_green <= vz_rms < thresh_yellow
@@ -166,6 +176,9 @@ def register_callbacks(
         )
 
         if fft_cache['sig'] is not None and fft_cache['x']:
+            if fft_cache['y']:
+                peak_index = int(np.argmax(fft_cache['y']))
+                dominant_fft_hz_label = f"{fft_cache['x'][peak_index]:.1f}"
             fft_traces.append(go.Scattergl(
                 x=fft_cache['x'],
                 y=fft_cache['y'],
@@ -208,6 +221,7 @@ def register_callbacks(
             rms_label,
             az_rms_label,
             hzz_label,
+            dominant_fft_hz_label,
             style_red,
             style_yellow,
             style_green,
@@ -243,10 +257,20 @@ def register_callbacks(
         prevent_initial_call=True,
     )
     def handle_logging(n_start, n_stop, n_intervals, rpm, load_w, log_data):
-        triggered = ctx.triggered_id
+        log_data = log_data or {}
         active = log_data.get('active', False)
+        triggered_props = set((ctx.triggered_prop_ids or {}).keys())
+        start_clicked = 'btn-start-log.n_clicks' in triggered_props
+        stop_clicked = 'btn-stop-log.n_clicks' in triggered_props
+        interval_ticked = 'interval-component.n_intervals' in triggered_props
 
-        if triggered == 'btn-start-log':
+        # Button clicks take priority over timer ticks to avoid click/interval races.
+        if stop_clicked:
+            if not active:
+                return 'No active recording.', log_data
+            return do_stop(log_data)
+
+        if start_clicked:
             if active:
                 return 'Already recording - stop first.', log_data
             rpm_val = int(rpm) if rpm is not None else 0
@@ -263,12 +287,7 @@ def register_callbacks(
                 },
             )
 
-        if triggered == 'btn-stop-log':
-            if not active:
-                return 'No active recording.', log_data
-            return do_stop(log_data)
-
-        if triggered == 'interval-component':
+        if interval_ticked:
             if not active:
                 return dash.no_update, dash.no_update
 

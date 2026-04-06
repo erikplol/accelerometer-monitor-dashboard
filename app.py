@@ -16,8 +16,8 @@ app.index_string = APP_INDEX_STRING
 app.title = "Engine Vibration Monitor"
 
 SAMPLING_RATE = DC_SAMPLING_RATE
-UI_INTERVAL_MS = 350
-MAX_DISPLAY_PTS = 500
+UI_INTERVAL_MS = 100
+MAX_DISPLAY_PTS = 150
 FFT_WINDOW_SECONDS = 15.0
 
 _reader = MAVLinkReader()

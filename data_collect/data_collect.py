@@ -32,12 +32,16 @@ def get_histories() -> dict:
         az_ms2 = list(state._az_ms2_history)
         vz_mms = list(state._wit_vz_mms_history)
         hzz_hz = list(state._wit_hzz_history)
+        wit_ts = list(state._wit_ts_history)
         ts = list(state._ts_history)
     rel = [stamp - ts[0] for stamp in ts] if ts else []
+    wit_rel = [stamp - wit_ts[0] for stamp in wit_ts] if wit_ts else []
     return {
         'az_ms2': az_ms2,
         'vz_mms': vz_mms,
         'hzz_hz': hzz_hz,
+        'wit_ts': wit_ts,
+        'wit_rel_s': wit_rel,
         'ts': ts,
         'rel_s': rel,
     }

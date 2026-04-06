@@ -84,6 +84,29 @@ def create_layout(thresh_green: float, thresh_yellow: float, ui_interval_ms: int
                     }),
                     html.Span('Hz', className='metric-unit'),
                 ], className='metric-value'),
+                html.Div([
+                    html.Span('Dominant FFT:', style={
+                        'color': '#8b949e',
+                        'fontSize': '0.78rem',
+                        'marginRight': 6,
+                    }),
+                    html.Span(id='dominant-fft-hz', children='-', style={
+                        'color': '#e6edf3',
+                        'fontSize': '0.88rem',
+                        'fontWeight': 500,
+                        'fontVariantNumeric': 'tabular-nums',
+                    }),
+                    html.Span('Hz', style={
+                        'color': '#8b949e',
+                        'fontSize': '0.78rem',
+                        'marginLeft': 4,
+                    }),
+                ], style={
+                    'marginTop': 4,
+                    'display': 'flex',
+                    'alignItems': 'center',
+                    'justifyContent': 'center',
+                }),
             ], style={**CARD, 'flex': '1 1 170px', 'alignSelf': 'stretch',
                       'display': 'flex', 'flexDirection': 'column', 'justifyContent': 'center', 'alignItems': 'center',
                       'borderTop': '2px solid #d29922'}, className='card-narrow'),

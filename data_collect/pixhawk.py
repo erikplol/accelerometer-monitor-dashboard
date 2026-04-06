@@ -92,7 +92,7 @@ class MAVLinkReader(threading.Thread):
             connection.target_component,
             mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
             0,
-            mavutil.mavlink.MAVLINK_MSG_ID_RAW_IMU,
+            mavutil.mavlink.MAVLINK_MSG_ID_HIGHRES_IMU,
             interval_us,
             0,
             0,
@@ -101,7 +101,7 @@ class MAVLinkReader(threading.Thread):
             0,
         )
 
-        print(f'[MAVLink] Requested RAW_IMU at {self.target_rate_hz} Hz')
+        print(f'[MAVLink] Requested HIGHRES_IMU at {self.target_rate_hz} Hz')
 
     def _calibrate_gravity(self, zacc_mg: float):
         if self._calibrated:
@@ -162,26 +162,16 @@ class MAVLinkReader(threading.Thread):
                 while not self._stop_event.is_set():
                     self._pause_event.wait()
 
-                    msg = connection.recv_match(blocking=True, timeout=0.5)
+                    msg = connection.recv_match(type='HIGHRES_IMU', blocking=True, timeout=0.5)
                     if msg is None:
                         continue
 
                     ts = time.time()
                     self._msg_count += 1
-                    self._update_rate_measurement(ts)
 
                     msg_type = msg.get_type()
 
-                    if msg_type == 'RAW_IMU':
-                        raw_zacc_mg = msg.zacc
-                        self._calibrate_gravity(raw_zacc_mg)
-                        if self._calibrated:
-                            zacc_corrected_mg = raw_zacc_mg - self._gravity_offset
-                        else:
-                            zacc_corrected_mg = raw_zacc_mg - 1000
-                        az_ms2 = zacc_corrected_mg * state.MG_TO_MS2
-
-                    elif msg_type == 'HIGHRES_IMU':
+                    if msg_type == 'HIGHRES_IMU':
                         raw_zacc_ms2 = msg.zacc
                         raw_zacc_mg = raw_zacc_ms2 / state.MG_TO_MS2
                         self._calibrate_gravity(raw_zacc_mg)
@@ -192,6 +182,9 @@ class MAVLinkReader(threading.Thread):
 
                     else:
                         continue
+
+                    # Use a monotonic clock for stable 1-second rate windows.
+                    self._update_rate_measurement(time.perf_counter())
 
                     with state._lock:
                         state._az_ms2_history.append(az_ms2)
