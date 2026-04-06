@@ -9,6 +9,8 @@ import serial
 from serial import SerialException
 
 from data_collect import state
+from data_collect.gpio import set_gpio_lights
+
 
 sys.path.insert(0, os.path.join(state.BASE_DIR, 'vb01_python_sdk'))
 from data_collect.vb01_python_sdk.device_model import DeviceModel
@@ -198,6 +200,13 @@ class WitmotionReader(threading.Thread):
 
                         with state._lock:
                             state._wit_latest_vz_mms = vz_mms
+                            if vz_mms > 0:
+                                is_red = vz_mms >= state.THRESH_YELLOW
+                                is_yellow = state.THRESH_GREEN <= vz_mms < state.THRESH_YELLOW
+                                is_green = vz_mms < state.THRESH_GREEN
+                            else:
+                                is_red, is_yellow, is_green = False, False, False
+                            set_gpio_lights(is_red, is_yellow, is_green)
                             state._wit_vz_mms_history.append(vz_mms)
                             state._wit_hzz_history.append(state._wit_latest_hzz_hz)
                             state._wit_ts_history.append(ts)

@@ -9,7 +9,6 @@ import numpy as np
 from pymavlink import mavutil
 
 from data_collect import state
-from data_collect.gpio import set_gpio_lights
 
 
 class MAVLinkReader(threading.Thread):
@@ -191,17 +190,6 @@ class MAVLinkReader(threading.Thread):
                         state._ts_history.append(ts)
                         wit_vz_mms = state._wit_latest_vz_mms
                         wit_hzz_hz = state._wit_latest_hzz_hz
-
-                        if self._msg_count % 25 == 0:
-                            rms = state.get_vz_rms_last_1s()
-                            if rms > 0:
-                                is_red = rms >= state.THRESH_YELLOW
-                                is_yellow = state.THRESH_GREEN <= rms < state.THRESH_YELLOW
-                                is_green = rms < state.THRESH_GREEN
-                            else:
-                                is_red, is_yellow, is_green = False, False, False
-
-                            set_gpio_lights(is_red, is_yellow, is_green)
 
                     with state._log_lock:
                         if state._log_active:
