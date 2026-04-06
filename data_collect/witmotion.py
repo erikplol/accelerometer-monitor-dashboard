@@ -17,6 +17,9 @@ from data_collect.vb01_python_sdk.device_model import DeviceModel
 
 _crc_helper = DeviceModel.__new__(DeviceModel)
 
+# Latest decoded Witmotion velocity sample (mm/s).
+vz_mms = 0.0
+
 
 def _build_read_request(addr: int, reg: int, count: int) -> bytes:
     frame = [addr, 0x03, reg >> 8, reg & 0xFF, count >> 8, count & 0xFF, 0x00, 0x00]
@@ -160,6 +163,7 @@ class WitmotionReader(threading.Thread):
         )
 
     def run(self):
+        global vz_mms
         fast_request = _build_read_request(self.modbus_addr, state.WITMOTION_FAST_START_REG, state.WITMOTION_FAST_REG_COUNT)
         hzz_request = _build_read_request(self.modbus_addr, state.REG_HZZ, 1)
 
@@ -198,15 +202,16 @@ class WitmotionReader(threading.Thread):
                         ts = time.time()
                         vz_mms = _decode_vz_mm_s(registers[state.REG_VZ])
 
+                        if vz_mms >= 0.0:
+                            is_red = vz_mms >= state.THRESH_YELLOW
+                            is_yellow = state.THRESH_GREEN <= vz_mms < state.THRESH_YELLOW
+                            is_green = vz_mms < state.THRESH_GREEN
+                        else:
+                            is_red, is_yellow, is_green = False, False, False
+                        set_gpio_lights(is_red, is_yellow, is_green)
+
                         with state._lock:
                             state._wit_latest_vz_mms = vz_mms
-                            if vz_mms > 0:
-                                is_red = vz_mms >= state.THRESH_YELLOW
-                                is_yellow = state.THRESH_GREEN <= vz_mms < state.THRESH_YELLOW
-                                is_green = vz_mms < state.THRESH_GREEN
-                            else:
-                                is_red, is_yellow, is_green = False, False, False
-                            set_gpio_lights(is_red, is_yellow, is_green)
                             state._wit_vz_mms_history.append(vz_mms)
                             state._wit_hzz_history.append(state._wit_latest_hzz_hz)
                             state._wit_ts_history.append(ts)
