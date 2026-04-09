@@ -127,7 +127,7 @@ def save_log(rpm: int, load_w: int, data: list) -> str:
             'iso_time',
             'az_ms2',
             'vz_mms',
-            'hzz_hz',
+            'rate_hz',
         ])
         for row in data:
             writer.writerow([
@@ -136,7 +136,7 @@ def save_log(rpm: int, load_w: int, data: list) -> str:
                 row['iso_time'],
                 f"{row['az_ms2']:.6f}",
                 f"{row['vz_mms']:.6f}",
-                f"{row.get('hzz_hz', 0.0):.6f}",
+                f"{row.get('rate_hz', 0.0):.6f}",
             ])
 
     print(

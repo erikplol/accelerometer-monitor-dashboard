@@ -61,21 +61,20 @@ def register_callbacks(
         az_all = h.get('az_ms2', [])
         vz_all = h.get('vz_mms', [])
         hzz_all = h.get('hzz_hz', [])
-        rel_all = h.get('wit_rel_s', [])
+        rel_all = h.get('rel_s', [])
 
-        # Keep VZ signal and x-axis lengths aligned to avoid stale-looking traces.
-        if rel_all and len(rel_all) != len(vz_all):
-            n = min(len(rel_all), len(vz_all))
+        # Keep AZ signal and x-axis lengths aligned to avoid stale-looking traces.
+        if rel_all and len(rel_all) != len(az_all):
+            n = min(len(rel_all), len(az_all))
             rel_all = rel_all[-n:]
-            vz_all = vz_all[-n:]
-            hzz_all = hzz_all[-n:] if len(hzz_all) >= n else hzz_all
+            az_all = az_all[-n:]
 
-        if len(vz_all) > max_display_pts:
-            step = max(1, len(vz_all) // max_display_pts)
-            vz_display = vz_all[::step]
+        if len(az_all) > max_display_pts:
+            step = max(1, len(az_all) // max_display_pts)
+            az_display = az_all[::step]
             rel = rel_all[::step]
         else:
-            vz_display = vz_all
+            az_display = az_all
             rel = rel_all
 
         az_color = '#58a6ff'
@@ -113,7 +112,7 @@ def register_callbacks(
             az_rms_label = '-'
 
         hzz_label = f'{hzz_all[-1]:.1f}' if hzz_all else '-'
-        dominant_fft_hz_label = '-'
+        dominant_fft_hz_label = f'{actual_rate:.1f}' if actual_rate > 0 else '-'
 
         is_red = vz_rms >= thresh_yellow
         is_yellow = thresh_green <= vz_rms < thresh_yellow
@@ -136,7 +135,7 @@ def register_callbacks(
             zeroline=True,
             zerolinecolor=ZERO_CLR,
             zerolinewidth=1,
-            title=dict(text='mm/s', font=dict(size=10, color=TICK_CLR)),
+            title=dict(text='m/s²', font=dict(size=10, color=TICK_CLR)),
             tickfont=dict(size=10),
             showgrid=True,
         )
@@ -144,11 +143,11 @@ def register_callbacks(
         time_fig = go.Figure(
             data=[go.Scattergl(
                 x=rel,
-                y=vz_display,
+                y=az_display,
                 mode='lines',
                 line=dict(color=az_color, width=1.5),
-                name='VZ',
-                hovertemplate='%{y:.2f} mm/s<extra></extra>',
+                name='AZ',
+                hovertemplate='%{y:.3f} m/s²<extra></extra>',
             )],
             layout=go.Layout(
                 plot_bgcolor=CARD_BG,
@@ -159,7 +158,7 @@ def register_callbacks(
                 xaxis=xaxis_s,
                 yaxis=yaxis_v,
                 showlegend=False,
-                uirevision='vz-time',
+                uirevision='az-time',
             ),
         )
 
@@ -176,9 +175,6 @@ def register_callbacks(
         )
 
         if fft_cache['sig'] is not None and fft_cache['x']:
-            if fft_cache['y']:
-                peak_index = int(np.argmax(fft_cache['y']))
-                dominant_fft_hz_label = f"{fft_cache['x'][peak_index]:.1f}"
             fft_traces.append(go.Scattergl(
                 x=fft_cache['x'],
                 y=fft_cache['y'],

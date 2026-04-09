@@ -189,7 +189,7 @@ class MAVLinkReader(threading.Thread):
                         state._az_ms2_history.append(az_ms2)
                         state._ts_history.append(ts)
                         wit_vz_mms = state._wit_latest_vz_mms
-                        wit_hzz_hz = state._wit_latest_hzz_hz
+                        pix_rate_hz = state._actual_rate_hz
 
                     with state._log_lock:
                         if state._log_active:
@@ -200,7 +200,7 @@ class MAVLinkReader(threading.Thread):
                                 'iso_time': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts)),
                                 'az_ms2': az_ms2,
                                 'vz_mms': wit_vz_mms,
-                                'hzz_hz': wit_hzz_hz,
+                                'rate_hz': pix_rate_hz,
                             })
 
                     if self._msg_count % 25 == 0:

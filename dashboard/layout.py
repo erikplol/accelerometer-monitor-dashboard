@@ -85,7 +85,7 @@ def create_layout(thresh_green: float, thresh_yellow: float, ui_interval_ms: int
                     html.Span('Hz', className='metric-unit'),
                 ], className='metric-value'),
                 html.Div([
-                    html.Span('Dominant FFT:', style={
+                    html.Span('Pixhawk Rate:', style={
                         'color': '#8b949e',
                         'fontSize': '0.78rem',
                         'marginRight': 6,
@@ -275,7 +275,7 @@ def create_layout(thresh_green: float, thresh_yellow: float, ui_interval_ms: int
 
         html.Div([
             html.Div([
-                html.Div('VZ · Witmotion Real Time', style={**LABEL, 'marginBottom': 4}),
+                html.Div('AZ · Pixhawk Real Time', style={**LABEL, 'marginBottom': 4}),
                 dcc.Graph(id='vz-time-graph', style={'flex': 1, 'minHeight': 0},
                           config={'displayModeBar': False, 'responsive': True}),
             ], style={**CARD, 'flex': 1, 'display': 'flex', 'flexDirection': 'column', 'minHeight': 0}),
