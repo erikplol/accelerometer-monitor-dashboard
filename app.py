@@ -41,4 +41,4 @@ register_callbacks(
 
 
 if __name__ == '__main__':
-    app.run(debug=True, dev_tools_ui=False, use_reloader=False, host='0.0.0.0', port=7770)
+    app.run(debug=True, dev_tools_ui=False, use_reloader=False, host='0.0.0.0', port=7777)
