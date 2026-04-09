@@ -13,7 +13,7 @@ LOG_DIR = os.path.join(BASE_DIR, 'logs')
 # Pixhawk config
 DEFAULT_PORT = 'COM5' if os.name == 'nt' else '/dev/serial/by-id/usb-Auterion_PX4_FMU_v6X.x_0-if00'
 PORT = os.getenv('MAVLINK_PORT', DEFAULT_PORT)
-BAUD = int(os.getenv('MAVLINK_BAUD', '460800'))
+BAUD = int(os.getenv('MAVLINK_BAUD', '1000000'))
 TARGET_IMU_RATE_HZ = int(os.getenv('MAVLINK_IMU_RATE_HZ', '400'))
 SAMPLING_RATE = float(TARGET_IMU_RATE_HZ)
 
