@@ -36,7 +36,7 @@ def register_callbacks(
     # Refresh FFT every ~15 seconds.
     fft_update_every_n_intervals = max(1, int(15_000 / ui_interval_ms))
     fft_cache = {'x': [], 'y': [], 'sig': None}
-    log_duration_s = 30
+    log_duration_s = 90
 
     @app.callback(
         [Output('vz-time-graph', 'figure'),
@@ -229,18 +229,27 @@ def register_callbacks(
         reader.pause()
         wit_reader.pause()
         try:
-            data = stop_logging()
+            data, stopped_now = stop_logging()
             rpm_val = log_data.get('rpm', 0)
             load_val = log_data.get('load', 0)
-            path = save_log(rpm_val, load_val, data)
-            fname = os.path.basename(path)
+            if stopped_now:
+                path = save_log(rpm_val, load_val, data)
+                fname = os.path.basename(path)
+            else:
+                path = log_data.get('last_path', '')
+                fname = os.path.basename(path) if path else 'already-saved'
         finally:
             reader.resume()
             wit_reader.resume()
 
-        prefix = '✔ Auto-saved' if auto else '✔ Saved'
+        if stopped_now:
+            prefix = '✔ Auto-saved' if auto else '✔ Saved'
+            status = f'{prefix} {len(data)} samples - {fname}'
+        else:
+            status = f'✔ Save already finished - {fname}'
+
         return (
-            f'{prefix} {len(data)} samples - {fname}',
+            status,
             {'active': False, 'rpm': rpm_val, 'load': load_val, 'start_time': 0, 'last_path': path},
         )
 

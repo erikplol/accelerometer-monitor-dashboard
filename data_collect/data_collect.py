@@ -81,12 +81,16 @@ def start_logging() -> None:
         state._log_counter = 0
 
 
-def stop_logging() -> list:
-    """Stop logging and return a snapshot of buffered rows."""
+def stop_logging() -> tuple[list, bool]:
+    """Stop logging once and return (buffered rows, changed_to_stopped)."""
     with state._log_lock:
-        state._log_active = False
+        was_active = state._log_active
         data = list(state._log_buffer)
-    return data
+        if was_active:
+            state._log_active = False
+            # Clear buffer after the first stop so repeated stop calls cannot resave.
+            state._log_buffer = []
+    return data, was_active
 
 
 def save_log(rpm: int, load_w: int, data: list) -> str:
@@ -196,7 +200,7 @@ def main():
         wit_reader.join(timeout=2.0)
 
     if args.log:
-        data = stop_logging()
+        data, _ = stop_logging()
         save_log(args.rpm, args.load, data)
 
 
