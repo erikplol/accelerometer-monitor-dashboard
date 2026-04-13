@@ -246,6 +246,50 @@ Rows contain:
 - `vz_mms`
 - `hzz_hz`
 
+## Offline FFT Export
+
+Use this helper script to read saved log CSV files, compute FFT, and export:
+
+- Graph (`*_fft.html`) for FFT visualization
+
+```bash
+# Process all CSV logs in logs/ and write results to fft/
+python export_fft_csv.py logs
+
+# Explicit batch mode for all files in logs folder (automatic per-file parameters)
+python export_fft_csv.py --all-logs
+
+# Process one file only
+python export_fft_csv.py logs/vibration_RPM1400_LOAD1000W_20260410_214815.csv
+```
+
+Graph output:
+
+- HTML plot file per log (`*_fft.html`)
+
+Interaction in HTML graph:
+
+- Hover any point for quick X/Y readout
+- Click any point to pin a label (`X`, `Y`) and vertical reference line
+- Click the same selected point again to unselect it
+- You can click multiple points to keep multiple peak labels
+- Default is 1 preselected peak on load
+
+Useful options:
+
+- `--all-logs` (process all files in logs folder individually)
+- `--logs-dir logs` (choose another logs folder for `--all-logs`)
+- `--column az_ms2` (default)
+- `--rate 350.0` (override sample rate)
+- `--window-seconds 20` (FFT window length)
+- `--label-decimals 3` (peak label frequency precision)
+- `--peak-count 1` (number of preselected peaks on load)
+- `--peak-min-separation-hz 1.0` (minimum spacing between highlighted peaks)
+- `--output-dir fft`
+- `--recursive` (scan subfolders)
+
+By default, sample rate is inferred per file from `iso_time` as average rows per second, with fallback to `unix_time` / `rate_hz` when needed.
+
 ## Configuration
 
 Main runtime settings are in `data_collect/state.py` and can be overridden with environment variables.
