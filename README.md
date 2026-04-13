@@ -195,12 +195,35 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+Windows (PowerShell/CMD):
+
+```bat
+run_windows.bat
+```
+
 ## Run
 
 ```bash
 ./run.sh
 # or
 python app.py
+```
+
+Windows:
+
+```bat
+run_windows.bat
+```
+
+On Windows, port selection is automatic by default (`MAVLINK_PORT=AUTO`, `WTVB_PORT=AUTO`),
+so the app can follow COM port changes without editing files.
+
+To force manual ports for one run:
+
+```bat
+set MAVLINK_PORT=COM7
+set WTVB_PORT=COM8
+run_windows.bat
 ```
 
 Dashboard URL: **http://localhost:7770**
