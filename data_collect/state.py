@@ -1,7 +1,6 @@
 """Shared runtime state and configuration for sensor collectors."""
 
 import os
-import re
 import threading
 from collections import deque
 
@@ -25,10 +24,13 @@ LINUX_DEFAULT_WITMOTION_PORT = '/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0
 DEFAULT_PORT = WINDOWS_DEFAULT_PORT if os.name == 'nt' else LINUX_DEFAULT_PORT
 DEFAULT_WITMOTION_PORT = WINDOWS_DEFAULT_WITMOTION_PORT if os.name == 'nt' else LINUX_DEFAULT_WITMOTION_PORT
 
-_PIXHAWK_KEYWORDS = ('pixhawk', 'px4', 'auterion', 'ardupilot', 'mavlink', 'fmu')
-_PIXHAWK_VIDS = {0x26AC, 0x2DAE}
-_WITMOTION_KEYWORDS = ('witmotion', 'wtvb', 'ch340', 'wch', 'usb-serial', 'usb serial')
+_PIXHAWK_VIDS = {0x26AC, 0x2DAE, 0x3185}
+_PIXHAWK_PIDS = {0x0035}
+_PIXHAWK_VID_PID = {(0x3185, 0x0035)}
 _WITMOTION_VIDS = {0x1A86}
+_WITMOTION_PIDS = {0x7523}
+_WITMOTION_VID_PID = {(0x1A86, 0x7523)}
+_DISABLED_PORT_VALUES = {'none', 'off', 'disable', 'disabled', 'false', '0'}
 
 
 def _normalize_port_env(value):
@@ -44,21 +46,18 @@ def _is_auto_port(value) -> bool:
     return value.lower() in {'auto', 'detect'}
 
 
-def _port_info_blob(port_info) -> str:
-    fields = []
-    for name in ('device', 'description', 'manufacturer', 'product', 'interface', 'hwid'):
-        value = getattr(port_info, name, None)
-        if value:
-            fields.append(str(value).lower())
-    return ' '.join(fields)
+def _is_disabled_port(value) -> bool:
+    if value is None:
+        return False
+    return value.lower() in _DISABLED_PORT_VALUES
 
 
 def _com_sort_key(port_info):
     device = str(getattr(port_info, 'device', '')).strip()
-    match = re.match(r'(?i)^com(\d+)$', device)
-    if match:
-        return (0, int(match.group(1)))
-    return (1, device.lower())
+    device_lower = device.lower()
+    if device_lower.startswith('com') and device_lower[3:].isdigit():
+        return (0, int(device_lower[3:]))
+    return (1, device_lower)
 
 
 def _list_serial_ports() -> list:
@@ -72,23 +71,20 @@ def _list_serial_ports() -> list:
         return []
 
 
-def _is_witmotion_port(port_info) -> bool:
+def _matches_usb_id(port_info, vids: set[int], pids: set[int], vid_pid_pairs: set[tuple[int, int]]) -> bool:
     vid = getattr(port_info, 'vid', None)
-    if vid in _WITMOTION_VIDS:
+    pid = getattr(port_info, 'pid', None)
+
+    if vid is not None and pid is not None and (vid, pid) in vid_pid_pairs:
         return True
-    blob = _port_info_blob(port_info)
-    return any(keyword in blob for keyword in _WITMOTION_KEYWORDS)
-
-
-def _is_pixhawk_port(port_info) -> bool:
-    vid = getattr(port_info, 'vid', None)
-    if vid in _PIXHAWK_VIDS:
+    if vid is not None and vid in vids:
         return True
-    blob = _port_info_blob(port_info)
-    return any(keyword in blob for keyword in _PIXHAWK_KEYWORDS)
+    if pid is not None and pid in pids:
+        return True
+    return False
 
 
-def _pick_port(ports: list, matcher, excluded_devices=None):
+def _pick_port_by_usb_id(ports: list, vids: set[int], pids: set[int], vid_pid_pairs: set[tuple[int, int]], excluded_devices=None):
     excluded = {str(device).lower() for device in (excluded_devices or []) if device}
     for port_info in ports:
         device = str(getattr(port_info, 'device', '')).strip()
@@ -96,7 +92,7 @@ def _pick_port(ports: list, matcher, excluded_devices=None):
             continue
         if device.lower() in excluded:
             continue
-        if matcher(port_info):
+        if _matches_usb_id(port_info, vids, pids, vid_pid_pairs):
             return device
     return None
 
@@ -105,26 +101,25 @@ def _resolve_windows_sensor_ports(mavlink_env, witmotion_env):
     mavlink_port = _normalize_port_env(mavlink_env)
     witmotion_port = _normalize_port_env(witmotion_env)
 
+    witmotion_disabled = _is_disabled_port(witmotion_port)
+    if witmotion_disabled:
+        witmotion_port = None
+
     if _is_auto_port(mavlink_port):
         mavlink_port = None
     if _is_auto_port(witmotion_port):
         witmotion_port = None
 
-    if mavlink_port and witmotion_port:
-        return mavlink_port, witmotion_port
-
     ports = _list_serial_ports()
 
+    # On Windows use USB IDs to avoid unstable COM numbering.
     if not mavlink_port:
         mavlink_port = (
-            _pick_port(
+            _pick_port_by_usb_id(
                 ports,
-                lambda info: _is_pixhawk_port(info) and not _is_witmotion_port(info),
-                excluded_devices=[witmotion_port],
-            )
-            or _pick_port(
-                ports,
-                lambda info: not _is_witmotion_port(info),
+                _PIXHAWK_VIDS,
+                _PIXHAWK_PIDS,
+                _PIXHAWK_VID_PID,
                 excluded_devices=[witmotion_port],
             )
             or WINDOWS_DEFAULT_PORT
@@ -132,31 +127,42 @@ def _resolve_windows_sensor_ports(mavlink_env, witmotion_env):
 
     if not witmotion_port:
         witmotion_port = (
-            _pick_port(ports, _is_witmotion_port, excluded_devices=[mavlink_port])
-            or _pick_port(ports, lambda _info: True, excluded_devices=[mavlink_port])
-            or WINDOWS_DEFAULT_WITMOTION_PORT
+            _pick_port_by_usb_id(
+                ports,
+                _WITMOTION_VIDS,
+                _WITMOTION_PIDS,
+                _WITMOTION_VID_PID,
+                excluded_devices=[mavlink_port],
+            )
+            or (None if witmotion_disabled else _pick_port_by_usb_id(
+                ports,
+                _WITMOTION_VIDS,
+                _WITMOTION_PIDS,
+                _WITMOTION_VID_PID,
+            ))
         )
 
-    if mavlink_port.lower() == witmotion_port.lower():
-        alternate_mavlink = (
-            _pick_port(
-                ports,
-                lambda info: not _is_witmotion_port(info),
-                excluded_devices=[witmotion_port],
-            )
-            or _pick_port(ports, lambda _info: True, excluded_devices=[witmotion_port])
+    if mavlink_port and witmotion_port and mavlink_port.lower() == witmotion_port.lower():
+        alternate_witmotion = _pick_port_by_usb_id(
+            ports,
+            _WITMOTION_VIDS,
+            _WITMOTION_PIDS,
+            _WITMOTION_VID_PID,
+            excluded_devices=[mavlink_port],
         )
-        if alternate_mavlink:
-            mavlink_port = alternate_mavlink
+        if alternate_witmotion:
+            witmotion_port = alternate_witmotion
+        else:
+            witmotion_port = None
 
     return mavlink_port, witmotion_port
 
 
 def _resolve_non_windows_port(env_value, default_value: str) -> str:
     configured = _normalize_port_env(env_value)
-    if _is_auto_port(configured):
+    if _is_auto_port(configured) or not configured:
         return default_value
-    return configured or default_value
+    return configured
 
 
 _mavlink_port_env = os.getenv('MAVLINK_PORT')
@@ -180,7 +186,8 @@ WITMOTION_BAUD_CANDIDATES = [
 ]
 WITMOTION_MODBUS_ADDR = int(os.getenv('WTVB_MODBUS_ADDR', '0x50'), 0)
 WITMOTION_SENSOR_RATE_HZ = int(float(os.getenv('WTVB_SENSOR_RATE_HZ', '100')))
-WITMOTION_SERIAL_TIMEOUT = float(os.getenv('WTVB_SERIAL_TIMEOUT', '0.15'))
+# Windows serial ports need higher timeout (0.3-0.5s) due to driver latency
+WITMOTION_SERIAL_TIMEOUT = float(os.getenv('WTVB_SERIAL_TIMEOUT', '0.5' if os.name == 'nt' else '0.15'))
 WITMOTION_CALIB_FILE = os.getenv('WTVB_CALIB_FILE', 'calibration/wtb_calib.txt')
 
 # Witmotion register map

@@ -100,8 +100,11 @@ class WitmotionReader(threading.Thread):
         deadline = time.perf_counter() + max_wait_s
         buffer = bytearray()
 
-        ser.write(request)
-        ser.flush()
+        try:
+            ser.write(request)
+            ser.flush()
+        except Exception:
+            return {}
 
         while time.perf_counter() < deadline:
             waiting = ser.in_waiting if hasattr(ser, 'in_waiting') else 0
@@ -164,6 +167,11 @@ class WitmotionReader(threading.Thread):
 
     def run(self):
         global vz_mms
+        if not self.port:
+            state._wit_connected = False
+            print('[Witmotion] Disabled (no port configured).')
+            return
+
         fast_request = _build_read_request(self.modbus_addr, state.WITMOTION_FAST_START_REG, state.WITMOTION_FAST_REG_COUNT)
         hzz_request = _build_read_request(self.modbus_addr, state.REG_HZZ, 1)
 
@@ -178,12 +186,14 @@ class WitmotionReader(threading.Thread):
                         self._pause_event.wait()
                         loop_started_at = time.perf_counter()
 
+                        # Adjust query timeout for Windows to handle driver latency
+                        query_timeout = 0.08 if os.name == 'nt' else 0.03
                         registers = self._query_registers(
                             ser,
                             fast_request,
                             state.WITMOTION_FAST_START_REG,
                             state.WITMOTION_FAST_REG_COUNT,
-                            max_wait_s=0.03,
+                            max_wait_s=query_timeout,
                         )
                         if not registers:
                             continue
@@ -194,7 +204,7 @@ class WitmotionReader(threading.Thread):
                                 hzz_request,
                                 state.REG_HZZ,
                                 1,
-                                max_wait_s=0.03,
+                                max_wait_s=query_timeout,
                             )
                             if hzz_registers:
                                 state._wit_latest_hzz_hz = _decode_hz(hzz_registers[state.REG_HZZ])

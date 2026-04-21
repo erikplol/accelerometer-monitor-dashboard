@@ -57,24 +57,48 @@ class MAVLinkReader(threading.Thread):
         self._msg_count = 0
         self._rate_window_start = None
         self._rate_window_count = 0
+        self._heartbeat_timeout_s = float(os.getenv('MAVLINK_HEARTBEAT_TIMEOUT', '2.0'))
+
+    def _candidate_ports(self) -> list[str]:
+        preferred = (self.port or '').strip()
+        return [preferred] if preferred else []
 
     def _connect(self) -> Any:
-        print(f'[MAVLink] Connecting to {self.port} @ {self.baud} baud...')
+        candidates = self._candidate_ports() or ([self.port] if self.port else [])
+        if not candidates:
+            raise RuntimeError('No candidate MAVLink ports available')
 
-        connection: Any = mavutil.mavlink_connection(
-            self.port,
-            baud=self.baud,
-            autoreconnect=True,
+        last_error = None
+        for candidate in candidates:
+            connection: Any = None
+            try:
+                print(f'[MAVLink] Connecting to {candidate} @ {self.baud} baud...')
+                connection = mavutil.mavlink_connection(
+                    candidate,
+                    baud=self.baud,
+                    autoreconnect=True,
+                )
+                print(f'[MAVLink] Waiting for heartbeat on {candidate}...')
+                connection.wait_heartbeat(timeout=self._heartbeat_timeout_s)
+                self.port = candidate
+                print(
+                    f'[MAVLink] Heartbeat received on {candidate} '
+                    f'(system {connection.target_system}, component {connection.target_component})'
+                )
+                return connection
+            except Exception as exc:
+                last_error = exc
+                print(f'[MAVLink] No heartbeat on {candidate}: {exc}')
+                if connection:
+                    try:
+                        connection.close()
+                    except Exception:
+                        pass
+
+        raise RuntimeError(
+            f'Unable to connect to Pixhawk on candidate ports {candidates}. '
+            f'Last error: {last_error}'
         )
-
-        print('[MAVLink] Waiting for heartbeat...')
-        connection.wait_heartbeat(timeout=10)
-        print(
-            f'[MAVLink] Heartbeat received (system {connection.target_system}, '
-            f'component {connection.target_component})'
-        )
-
-        return connection
 
     def _configure_stream_rate(self, connection: Any):
         connection.mav.request_data_stream_send(
@@ -143,7 +167,7 @@ class MAVLinkReader(threading.Thread):
         self._rate_window_count = 0
 
     def run(self):
-        reconnect_delay = 3
+        reconnect_delay = float(os.getenv('MAVLINK_RECONNECT_DELAY', '1.0'))
 
         while not self._stop_event.is_set():
             connection: Any = None
@@ -161,9 +185,17 @@ class MAVLinkReader(threading.Thread):
                 while not self._stop_event.is_set():
                     self._pause_event.wait()
 
-                    msg = connection.recv_match(type='HIGHRES_IMU', blocking=True, timeout=0.5)
-                    if msg is None:
-                        continue
+                    # Windows: use non-blocking reads to avoid driver stalls
+                    # Linux/Unix: use blocking with short timeout for efficiency
+                    if os.name == 'nt':
+                        msg = connection.recv_match(type='HIGHRES_IMU', blocking=False, timeout=0.1)
+                        if msg is None:
+                            time.sleep(0.001)
+                            continue
+                    else:
+                        msg = connection.recv_match(type='HIGHRES_IMU', blocking=True, timeout=0.5)
+                        if msg is None:
+                            continue
 
                     ts = time.time()
                     self._msg_count += 1

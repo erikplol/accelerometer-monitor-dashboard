@@ -1,4 +1,5 @@
 import dash
+import os
 
 from data_collect.data_collect import (
     MAVLinkReader,
@@ -16,14 +17,22 @@ app.index_string = APP_INDEX_STRING
 app.title = "Engine Vibration Monitor"
 
 SAMPLING_RATE = DC_SAMPLING_RATE
-UI_INTERVAL_MS = 100
-MAX_DISPLAY_PTS = 150
+# Windows needs longer intervals to prevent connection issues
+UI_INTERVAL_MS = 400 if os.name == 'nt' else 100
+MAX_DISPLAY_PTS = 100  # Reduce from 150 for faster rendering on Windows
 FFT_WINDOW_SECONDS = 15.0
 
 _reader = MAVLinkReader()
-_reader.start()
+try:
+    _reader.start()
+except Exception as e:
+    print(f'[Warning] Failed to start Pixhawk reader: {e}')
+
 _wit_reader = WitmotionReader()
-_wit_reader.start()
+try:
+    _wit_reader.start()
+except Exception as e:
+    print(f'[Warning] Failed to start Witmotion reader: {e}')
 
 app.layout = create_layout(THRESH_GREEN, THRESH_YELLOW, UI_INTERVAL_MS)
 
@@ -41,4 +50,14 @@ register_callbacks(
 
 
 if __name__ == '__main__':
-    app.run(debug=True, dev_tools_ui=False, use_reloader=False, host='0.0.0.0', port=7777)
+    print('[Dashboard] Starting Engine Vibration Monitor on http://localhost:7777')
+    print('[Dashboard] Press Ctrl+C to stop')
+    # Disable debug and hot reload on Windows to prevent connection issues
+    app.run(
+        debug=False,
+        dev_tools_ui=False,
+        use_reloader=False,
+        host='0.0.0.0',
+        port=7777,
+        threaded=True,
+    )

@@ -17,6 +17,7 @@ from data_collect.data_collect import (
     save_log,
     start_logging,
     stop_logging,
+    LOG_DIR,
 )
 from dashboard.fft import refresh_fft_cache
 from dashboard.theme import CARD_BG, GRID_CLR, TICK_CLR, YAXIS_VEL, ZERO_CLR, light_style
@@ -57,6 +58,7 @@ def register_callbacks(
         if (playback_data or {}).get('paused', False):
             return tuple([dash.no_update] * 11)
 
+        # Get all data from collection threads
         h = get_histories()
         az_all = h.get('az_ms2', [])
         vz_all = h.get('vz_mms', [])
@@ -332,13 +334,13 @@ def register_callbacks(
         if last_path and os.path.exists(last_path):
             return dcc.send_file(last_path)
 
-        logs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
-        if not os.path.isdir(logs_dir):
+        # Use LOG_DIR from data_collect which points to correct logs directory
+        if not os.path.isdir(LOG_DIR):
             return dash.no_update
 
         candidates = [
-            os.path.join(logs_dir, name)
-            for name in os.listdir(logs_dir)
+            os.path.join(LOG_DIR, name)
+            for name in os.listdir(LOG_DIR)
             if name.endswith('.csv')
         ]
         if not candidates:
@@ -353,14 +355,14 @@ def register_callbacks(
         prevent_initial_call=True,
     )
     def download_all_logs(n_clicks):
-        logs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
-        if not os.path.isdir(logs_dir):
+        # Use LOG_DIR from data_collect which points to correct logs directory
+        if not os.path.isdir(LOG_DIR):
             return dash.no_update
 
         candidates = sorted(
             [
-                os.path.join(logs_dir, name)
-                for name in os.listdir(logs_dir)
+                os.path.join(LOG_DIR, name)
+                for name in os.listdir(LOG_DIR)
                 if name.endswith('.csv')
             ],
             key=os.path.getmtime,
