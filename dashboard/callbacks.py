@@ -24,6 +24,8 @@ from data_collect.data_collect import (
 from data_collect.calibration import (
     get_pixhawk_offset, get_pixhawk_base,
     set_pixhawk_offset, save_pixhawk_offset, reset_pixhawk_offset,
+    get_pixhawk_az_scale, get_pixhawk_az_scale_base,
+    set_pixhawk_az_scale, save_pixhawk_az_scale, reset_pixhawk_az_scale,
     get_witmotion_scale, get_witmotion_base_scale,
     set_witmotion_scale, save_witmotion_scale, reset_witmotion_scale,
 )
@@ -462,6 +464,54 @@ def register_callbacks(
         base    = get_pixhawk_base()
         base_label = f'Base (on-disk): {base:.3f} mG'
         return f'{current:.3f}', base_label, status
+
+    # ── Pixhawk AZ scale ───────────────────────────────────────────
+    @app.callback(
+        Output('pix-scale-current-val', 'children'),
+        Output('pix-scale-base-label',  'children'),
+        Output('calib-status', 'children', allow_duplicate=True),
+        Input('pix-scale-minus01',   'n_clicks'),
+        Input('pix-scale-minus001',  'n_clicks'),
+        Input('pix-scale-minus0001', 'n_clicks'),
+        Input('pix-scale-plus0001',  'n_clicks'),
+        Input('pix-scale-plus001',   'n_clicks'),
+        Input('pix-scale-plus01',    'n_clicks'),
+        Input('pix-scale-save',      'n_clicks'),
+        Input('pix-scale-reset',     'n_clicks'),
+        Input('interval-component',  'n_intervals'),
+        prevent_initial_call='initial_duplicate',
+    )
+    def update_pix_scale_calib(*_):
+        triggered = ctx.triggered_id
+
+        delta_map = {
+            'pix-scale-minus01':   -0.1,
+            'pix-scale-minus001':  -0.01,
+            'pix-scale-minus0001': -0.001,
+            'pix-scale-plus0001':  +0.001,
+            'pix-scale-plus001':   +0.01,
+            'pix-scale-plus01':    +0.1,
+        }
+
+        status = dash.no_update
+
+        if triggered in delta_map:
+            new_val = round(max(0.0, get_pixhawk_az_scale() + delta_map[triggered]), 6)
+            set_pixhawk_az_scale(new_val)
+            status = f'Pixhawk AZ scale adjusted to {new_val:.4f}×  (unsaved)'
+
+        elif triggered == 'pix-scale-save':
+            path = save_pixhawk_az_scale(get_pixhawk_az_scale())
+            status = f'✔ Saved Pixhawk AZ scale {get_pixhawk_az_scale():.4f}× → {path}'
+
+        elif triggered == 'pix-scale-reset':
+            val = reset_pixhawk_az_scale()
+            status = f'↺ Reset Pixhawk AZ scale to base {val:.4f}×'
+
+        current = get_pixhawk_az_scale()
+        base    = get_pixhawk_az_scale_base()
+        base_label = f'Base (on-disk): {base:.6f}×'
+        return f'{current:.4f}', base_label, status
 
     # ── Witmotion calibration ────────────────────────────────────────────
     @app.callback(

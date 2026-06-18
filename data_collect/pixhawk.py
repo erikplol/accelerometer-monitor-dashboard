@@ -201,7 +201,8 @@ class MAVLinkReader(threading.Thread):
                         raw_zacc_mg = raw_zacc_ms2 / state.MG_TO_MS2
                         self._calibrate_gravity(raw_zacc_mg)
                         if self._calibrated:
-                            az_ms2 = raw_zacc_ms2 - (state._actual_gravity_offset * state.MG_TO_MS2)
+                            az_ms2 = (raw_zacc_ms2 - (state._actual_gravity_offset * state.MG_TO_MS2)) \
+                                     * state._pixhawk_az_scale
                         else:
                             az_ms2 = raw_zacc_ms2 - 9.80665
 

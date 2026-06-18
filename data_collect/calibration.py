@@ -43,6 +43,44 @@ def reset_pixhawk_offset() -> float:
 
 
 # ---------------------------------------------------------------------------
+# Pixhawk AZ scale multiplier
+# ---------------------------------------------------------------------------
+
+def get_pixhawk_az_scale() -> float:
+    """Return the currently active Pixhawk AZ scale multiplier."""
+    return state._pixhawk_az_scale
+
+
+def get_pixhawk_az_scale_base() -> float:
+    """Return the on-disk base AZ scale value."""
+    return state._pixhawk_az_scale_base
+
+
+def set_pixhawk_az_scale(new_scale: float) -> None:
+    """Apply a new AZ scale multiplier to the running reader immediately (min 0)."""
+    state._pixhawk_az_scale = max(0.0, float(new_scale))
+
+
+def save_pixhawk_az_scale(new_scale: float) -> str:
+    """Persist a new AZ scale to the calibration file and apply it."""
+    set_pixhawk_az_scale(new_scale)
+    state._pixhawk_az_scale_base = state._pixhawk_az_scale
+    calib_dir = os.path.dirname(state.PIXHAWK_SCALE_CALIB_FILE)
+    if calib_dir:
+        os.makedirs(calib_dir, exist_ok=True)
+    with open(state.PIXHAWK_SCALE_CALIB_FILE, 'w') as fh:
+        fh.write(f'{state._pixhawk_az_scale:.6f}\n')
+    return state.PIXHAWK_SCALE_CALIB_FILE
+
+
+def reset_pixhawk_az_scale() -> float:
+    """Reset the active AZ scale back to the on-disk base value."""
+    base = state._pixhawk_az_scale_base
+    state._pixhawk_az_scale = base
+    return base
+
+
+# ---------------------------------------------------------------------------
 # Witmotion VZ scale
 # ---------------------------------------------------------------------------
 

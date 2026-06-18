@@ -200,6 +200,7 @@ WITMOTION_FAST_REG_COUNT = 7
 MAX_TIME_PTS = int(max(600, 60 * SAMPLING_RATE))
 
 CALIB_FILE = os.getenv('MAVLINK_CALIB_FILE', 'calibration/pixhawk_calib.txt')
+PIXHAWK_SCALE_CALIB_FILE = os.getenv('MAVLINK_SCALE_CALIB_FILE', 'calibration/pixhawk_scale_calib.txt')
 
 
 def _load_witmotion_scale() -> float:
@@ -240,6 +241,25 @@ def _init_gravity_offset():
         pass
 
 _init_gravity_offset()
+
+# Live Pixhawk AZ scale multiplier — applied after gravity removal
+# _pixhawk_az_scale_base : value loaded from file (never changed except on save)
+# _pixhawk_az_scale      : value used by the reader loop right now
+_pixhawk_az_scale_base: float = 1.0
+_pixhawk_az_scale:      float = 1.0
+
+def _init_pixhawk_az_scale():
+    """Read the AZ scale calibration file once and initialise tracking variables."""
+    global _pixhawk_az_scale_base, _pixhawk_az_scale
+    try:
+        if os.path.exists(PIXHAWK_SCALE_CALIB_FILE):
+            val = max(0.0, float(open(PIXHAWK_SCALE_CALIB_FILE).read().strip()))
+            _pixhawk_az_scale_base = val
+            _pixhawk_az_scale      = val
+    except Exception:
+        pass
+
+_init_pixhawk_az_scale()
 
 # Shared data buffers
 _az_ms2_history = deque(maxlen=MAX_TIME_PTS)
