@@ -174,7 +174,7 @@ class MAVLinkReader(threading.Thread):
                 if not self._calibrated:
                     print('[MAVLink] Calibrating gravity offset (keep device still)...')
                 else:
-                    print(f'[MAVLink] Using fixed gravity offset: {self._gravity_offset:+.1f} mG')
+                    print(f'[MAVLink] Using fixed gravity offset: {state._actual_gravity_offset:+.1f} mG')
 
                 while not self._stop_event.is_set():
                     self._pause_event.wait()

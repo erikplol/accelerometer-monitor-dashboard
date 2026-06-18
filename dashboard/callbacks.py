@@ -494,7 +494,7 @@ def register_callbacks(
         status = dash.no_update
 
         if triggered in delta_map:
-            new_val = round(get_witmotion_scale() + delta_map[triggered], 6)
+            new_val = round(max(0.0, get_witmotion_scale() + delta_map[triggered]), 6)
             set_witmotion_scale(new_val)
             status = f'Witmotion scale adjusted to {new_val:.4f}×  (unsaved)'
 
