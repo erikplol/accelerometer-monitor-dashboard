@@ -1,8 +1,7 @@
 """GPIO traffic light helpers for vibration status.
 
-Uses libgpiod (gpiochip4 / pinctrl-rp1) for Raspberry Pi 5 compatibility.
-Falls back to gpiozero for older Pi models, then silently disables if
-neither library is available (e.g. development on non-Pi hardware).
+Uses libgpiod 2.x (gpiochip4 / pinctrl-rp1) for Raspberry Pi 5.
+Silently disables if gpiod is unavailable (e.g. development on non-Pi hardware).
 
 Pin assignments (BCM numbering):
     GPIO 17 -> Red LED
@@ -10,63 +9,43 @@ Pin assignments (BCM numbering):
     GPIO 22 -> Green LED
 """
 
-from typing import Any, Optional
-
 # ---------------------------------------------------------------------------
-# GPIO chip to use on Raspberry Pi 5 (RP1 / pinctrl-rp1)
+# Config
 # ---------------------------------------------------------------------------
-_GPIOCHIP = "gpiochip4"
-_PIN_RED = 17
+_GPIOCHIP  = "/dev/gpiochip4"
+_PIN_RED    = 17
 _PIN_YELLOW = 27
-_PIN_GREEN = 22
+_PIN_GREEN  = 22
 
 # ---------------------------------------------------------------------------
-# Attempt to initialise via libgpiod first (Pi 5), then gpiozero (Pi 4/3/2)
+# Initialise gpiod 2.x
 # ---------------------------------------------------------------------------
 _GPIO_AVAILABLE = False
-_backend = None  # "gpiod" | "gpiozero"
+_request = None
 
-# --- libgpiod -----------------------------------------------------------------
 try:
-    import gpiod  # type: ignore[import-not-found]
+    import gpiod
+    from gpiod.line import Direction, Value as _Value
 
-    _chip = gpiod.Chip(_GPIOCHIP)
+    _settings = gpiod.LineSettings(
+        direction=Direction.OUTPUT,
+        output_value=_Value.INACTIVE,
+    )
 
-    _line_red = _chip.get_line(_PIN_RED)
-    _line_yellow = _chip.get_line(_PIN_YELLOW)
-    _line_green = _chip.get_line(_PIN_GREEN)
-
-    for _line in (_line_red, _line_yellow, _line_green):
-        _line.request(
-            consumer="vibration-monitor",
-            type=gpiod.LINE_REQ_DIR_OUT,
-            default_val=0,
-        )
-
+    _request = gpiod.request_lines(
+        _GPIOCHIP,
+        consumer="vibration-monitor",
+        config={
+            _PIN_RED:    _settings,
+            _PIN_YELLOW: _settings,
+            _PIN_GREEN:  _settings,
+        },
+    )
     _GPIO_AVAILABLE = True
-    _backend = "gpiod"
 
 except Exception:
-    _line_red = None
-    _line_yellow = None
-    _line_green = None
-
-# --- gpiozero fallback --------------------------------------------------------
-if not _GPIO_AVAILABLE:
-    try:
-        from gpiozero import LED  # type: ignore[import-not-found]
-
-        led_red = LED(_PIN_RED, active_high=False)
-        led_yellow = LED(_PIN_YELLOW, active_high=False)
-        led_green = LED(_PIN_GREEN, active_high=False)
-
-        _GPIO_AVAILABLE = True
-        _backend = "gpiozero"
-
-    except Exception:
-        led_red: Optional[Any] = None
-        led_yellow: Optional[Any] = None
-        led_green: Optional[Any] = None
+    _request = None
+    _GPIO_AVAILABLE = False
 
 
 # ---------------------------------------------------------------------------
@@ -81,26 +60,25 @@ def set_gpio_lights(red: bool, yellow: bool, green: bool) -> None:
         yellow: Turn the yellow LED on (True) or off (False).
         green:  Turn the green LED on (True) or off (False).
     """
-    if not _GPIO_AVAILABLE:
+    if not _GPIO_AVAILABLE or _request is None:
         return
 
-    if _backend == "gpiod":
-        _line_red.set_value(1 if red else 0)
-        _line_yellow.set_value(1 if yellow else 0)
-        _line_green.set_value(1 if green else 0)
-
-    elif _backend == "gpiozero":
-        led_red.on() if red else led_red.off()
-        led_yellow.on() if yellow else led_yellow.off()
-        led_green.on() if green else led_green.off()
+    _request.set_values({
+        _PIN_RED:    _Value.ACTIVE if red    else _Value.INACTIVE,
+        _PIN_YELLOW: _Value.ACTIVE if yellow else _Value.INACTIVE,
+        _PIN_GREEN:  _Value.ACTIVE if green  else _Value.INACTIVE,
+    })
 
 
 def cleanup() -> None:
-    """Release GPIO lines. Call on application shutdown when using gpiod."""
-    if _backend == "gpiod":
-        for _line in (_line_red, _line_yellow, _line_green):
-            if _line is not None:
-                try:
-                    _line.release()
-                except Exception:
-                    pass
+    """Release GPIO lines. Call on application shutdown."""
+    if _request is not None:
+        try:
+            _request.set_values({
+                _PIN_RED:    _Value.INACTIVE,
+                _PIN_YELLOW: _Value.INACTIVE,
+                _PIN_GREEN:  _Value.INACTIVE,
+            })
+            _request.release()
+        except Exception:
+            pass
