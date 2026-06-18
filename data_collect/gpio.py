@@ -2,15 +2,24 @@
 
 Uses libgpiod (gpiochip4 / pinctrl-rp1) for Raspberry Pi 5.
 Auto-detects gpiod 2.x vs 1.x API.
+Thread-safe: uses a lock to prevent interleaved pin writes.
+State-tracked: skips redundant writes when state has not changed.
 Silently disables if gpiod is unavailable (e.g. development on non-Pi hardware).
 
 Pin assignments (BCM numbering):
     GPIO 17 -> Red LED
     GPIO 27 -> Yellow LED
     GPIO 22 -> Green LED
+
+Public API:
+    set_gpio_lights(red, yellow, green)  — set all three LEDs explicitly
+    set_status(status)                   — convenience: "red" | "yellow" | "green" | "off"
+    all_off()                            — turn everything off immediately
+    cleanup()                            — release GPIO lines on shutdown
 """
 
 import os
+import threading
 
 # ---------------------------------------------------------------------------
 # Config
@@ -21,13 +30,17 @@ _PIN_YELLOW = 27
 _PIN_GREEN  = 22
 
 # ---------------------------------------------------------------------------
-# Initialise gpiod (auto-detect 1.x vs 2.x API)
+# Internal state
 # ---------------------------------------------------------------------------
+_lock          = threading.Lock()
+_current_state = {_PIN_RED: False, _PIN_YELLOW: False, _PIN_GREEN: False}
 _GPIO_AVAILABLE = False
-_set_pin_fn = None   # callable(pin: int, state: bool)
-_set_all_fn = None   # callable(states: dict[int, bool])
-_release_fn = None   # callable()
+_set_all_fn     = None   # callable(states: dict[int, bool])
+_release_fn     = None   # callable()
 
+# ---------------------------------------------------------------------------
+# Initialise gpiod (auto-detect 2.x vs 1.x API)
+# ---------------------------------------------------------------------------
 try:
     if not os.path.exists(_GPIOCHIP):
         raise RuntimeError(f"GPIO chip not found: {_GPIOCHIP}")
@@ -36,11 +49,11 @@ try:
 
     # ---- gpiod 2.x -------------------------------------------------------
     if hasattr(gpiod, "request_lines") or hasattr(gpiod, "LineSettings"):
-        from gpiod.line import Direction, Value
+        from gpiod.line import Direction, Value as _Value
 
         _settings = gpiod.LineSettings(
             direction=Direction.OUTPUT,
-            output_value=Value.INACTIVE,
+            output_value=_Value.INACTIVE,
         )
         _request = gpiod.request_lines(
             _GPIOCHIP,
@@ -52,45 +65,34 @@ try:
             },
         )
 
-        def _set_pin_fn(pin: int, state: bool):
-            _request.set_value(pin, Value.ACTIVE if state else Value.INACTIVE)
-
         def _set_all_fn(states: dict):
             _request.set_values({
-                pin: (Value.ACTIVE if val else Value.INACTIVE)
+                pin: (_Value.ACTIVE if val else _Value.INACTIVE)
                 for pin, val in states.items()
             })
 
         def _release_fn():
             _request.set_values({
-                _PIN_RED:    Value.INACTIVE,
-                _PIN_YELLOW: Value.INACTIVE,
-                _PIN_GREEN:  Value.INACTIVE,
+                _PIN_RED:    _Value.INACTIVE,
+                _PIN_YELLOW: _Value.INACTIVE,
+                _PIN_GREEN:  _Value.INACTIVE,
             })
             _request.release()
 
     # ---- gpiod 1.x -------------------------------------------------------
     else:
         _chip = gpiod.Chip(_GPIOCHIP)
-        _line_red    = _chip.get_line(_PIN_RED)
-        _line_yellow = _chip.get_line(_PIN_YELLOW)
-        _line_green  = _chip.get_line(_PIN_GREEN)
-
-        for _line in (_line_red, _line_yellow, _line_green):
+        _pin_map = {
+            _PIN_RED:    _chip.get_line(_PIN_RED),
+            _PIN_YELLOW: _chip.get_line(_PIN_YELLOW),
+            _PIN_GREEN:  _chip.get_line(_PIN_GREEN),
+        }
+        for _line in _pin_map.values():
             _line.request(
                 consumer="vibration-monitor",
                 type=gpiod.LINE_REQ_DIR_OUT,
                 default_val=0,
             )
-
-        _pin_map = {
-            _PIN_RED:    _line_red,
-            _PIN_YELLOW: _line_yellow,
-            _PIN_GREEN:  _line_green,
-        }
-
-        def _set_pin_fn(pin: int, state: bool):
-            _pin_map[pin].set_value(1 if state else 0)
 
         def _set_all_fn(states: dict):
             for pin, val in states.items():
@@ -109,11 +111,45 @@ except Exception:
 
 
 # ---------------------------------------------------------------------------
+# Internal write — always called under _lock
+# ---------------------------------------------------------------------------
+def _apply(red: bool, yellow: bool, green: bool) -> None:
+    """Write pin states. Caller must hold _lock."""
+    global _current_state
+
+    desired = {_PIN_RED: red, _PIN_YELLOW: yellow, _PIN_GREEN: green}
+
+    # Skip if nothing changed
+    if desired == _current_state:
+        return
+
+    # Phase 1: turn OFF any pin that should now be off (prevents ghost-on)
+    off_state = {
+        pin: False
+        for pin, val in desired.items()
+        if not val
+    }
+    if off_state:
+        _set_all_fn(off_state)
+
+    # Phase 2: turn ON the pins that should be on
+    on_state = {
+        pin: True
+        for pin, val in desired.items()
+        if val
+    }
+    if on_state:
+        _set_all_fn(on_state)
+
+    _current_state = desired
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 def set_gpio_lights(red: bool, yellow: bool, green: bool) -> None:
-    """Set status LEDs for red/yellow/green states.
+    """Set all three status LEDs explicitly.
 
     Args:
         red:    Turn the red LED on (True) or off (False).
@@ -123,16 +159,42 @@ def set_gpio_lights(red: bool, yellow: bool, green: bool) -> None:
     if not _GPIO_AVAILABLE or _set_all_fn is None:
         return
 
-    _set_all_fn({
-        _PIN_RED:    red,
-        _PIN_YELLOW: yellow,
-        _PIN_GREEN:  green,
-    })
+    with _lock:
+        _apply(red, yellow, green)
+
+
+def set_status(status: str) -> None:
+    """Convenience function — light one LED exclusively and turn off the rest.
+
+    Args:
+        status: One of "red" | "yellow" | "green" | "off"
+
+    Example:
+        set_status("red")     # Red ON, Yellow OFF, Green OFF
+        set_status("green")   # Red OFF, Yellow OFF, Green ON
+        set_status("off")     # All OFF
+    """
+    mapping = {
+        "red":    (True,  False, False),
+        "yellow": (False, True,  False),
+        "green":  (False, False, True ),
+        "off":    (False, False, False),
+    }
+    r, y, g = mapping.get(status.lower(), (False, False, False))
+    set_gpio_lights(r, y, g)
+
+
+def all_off() -> None:
+    """Turn all LEDs off immediately."""
+    set_gpio_lights(False, False, False)
 
 
 def cleanup() -> None:
-    """Release GPIO lines. Call on application shutdown."""
-    if _GPIO_AVAILABLE and _release_fn is not None:
+    """Turn off all LEDs and release GPIO lines. Call on application shutdown."""
+    if not _GPIO_AVAILABLE or _release_fn is None:
+        return
+
+    with _lock:
         try:
             _release_fn()
         except Exception:
