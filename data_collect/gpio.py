@@ -53,7 +53,7 @@ try:
 
         _settings = gpiod.LineSettings(
             direction=Direction.OUTPUT,
-            output_value=_Value.INACTIVE,
+            output_value=_Value.ACTIVE,   # active-low: default OFF = pin HIGH
         )
         _request = gpiod.request_lines(
             _GPIOCHIP,
@@ -66,16 +66,19 @@ try:
         )
 
         def _set_all_fn(states: dict):
+            # active-low: LED ON  = pin LOW  (INACTIVE)
+            #             LED OFF = pin HIGH (ACTIVE)
             _request.set_values({
-                pin: (_Value.ACTIVE if val else _Value.INACTIVE)
+                pin: (_Value.INACTIVE if val else _Value.ACTIVE)
                 for pin, val in states.items()
             })
 
         def _release_fn():
+            # active-low: turn OFF = set HIGH (ACTIVE)
             _request.set_values({
-                _PIN_RED:    _Value.INACTIVE,
-                _PIN_YELLOW: _Value.INACTIVE,
-                _PIN_GREEN:  _Value.INACTIVE,
+                _PIN_RED:    _Value.ACTIVE,
+                _PIN_YELLOW: _Value.ACTIVE,
+                _PIN_GREEN:  _Value.ACTIVE,
             })
             _request.release()
 
@@ -95,12 +98,14 @@ try:
             )
 
         def _set_all_fn(states: dict):
+            # active-low: LED ON = 0 (LOW), LED OFF = 1 (HIGH)
             for pin, val in states.items():
-                _pin_map[pin].set_value(1 if val else 0)
+                _pin_map[pin].set_value(0 if val else 1)
 
         def _release_fn():
+            # active-low: turn OFF = set HIGH (1)
             for _line in _pin_map.values():
-                _line.set_value(0)
+                _line.set_value(1)
                 _line.release()
             _chip.close()
 
@@ -123,21 +128,13 @@ def _apply(red: bool, yellow: bool, green: bool) -> None:
     if desired == _current_state:
         return
 
-    # Phase 1: turn OFF any pin that should now be off (prevents ghost-on)
-    off_state = {
-        pin: False
-        for pin, val in desired.items()
-        if not val
-    }
+    # Phase 1: turn OFF first (active-low: OFF = HIGH → no ghost light)
+    off_state = {pin: False for pin, val in desired.items() if not val}
     if off_state:
         _set_all_fn(off_state)
 
-    # Phase 2: turn ON the pins that should be on
-    on_state = {
-        pin: True
-        for pin, val in desired.items()
-        if val
-    }
+    # Phase 2: turn ON desired pins
+    on_state = {pin: True for pin, val in desired.items() if val}
     if on_state:
         _set_all_fn(on_state)
 
