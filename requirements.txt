@@ -4,3 +4,9 @@ plotly==5.17.0
 numpy>=1.26.0
 pyserial==3.5
 pymavlink==2.4.40
+
+# GPIO support (Raspberry Pi only)
+# gpiod  >= 2.0 for Pi 5 (pinctrl-rp1 / gpiochip4) -- install via: pip install gpiod
+# gpiozero is used as a fallback for Pi 4 / 3 / 2   -- install via: pip install gpiozero
+gpiod>=2.0.0
+gpiozero>=2.0
