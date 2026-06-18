@@ -20,6 +20,7 @@ Public API:
 
 import os
 import threading
+import time
 
 # ---------------------------------------------------------------------------
 # Config
@@ -32,8 +33,10 @@ _PIN_GREEN  = 22
 # ---------------------------------------------------------------------------
 # Internal state
 # ---------------------------------------------------------------------------
-_lock          = threading.Lock()
-_current_state = {_PIN_RED: False, _PIN_YELLOW: False, _PIN_GREEN: False}
+_lock           = threading.Lock()
+_current_state  = {_PIN_RED: False, _PIN_YELLOW: False, _PIN_GREEN: False}
+_pending_state  = {_PIN_RED: False, _PIN_YELLOW: False, _PIN_GREEN: False}
+_pending_event  = threading.Event()   # signals GPIO thread that new state is waiting
 _GPIO_AVAILABLE = False
 _set_all_fn     = None   # callable(states: dict[int, bool])
 _release_fn     = None   # callable()
@@ -114,31 +117,37 @@ try:
 except Exception:
     _GPIO_AVAILABLE = False
 
-
 # ---------------------------------------------------------------------------
-# Internal write — always called under _lock
+# Background GPIO writer thread
 # ---------------------------------------------------------------------------
-def _apply(red: bool, yellow: bool, green: bool) -> None:
-    """Write pin states. Caller must hold _lock."""
-    global _current_state
+_gpio_thread_stop = threading.Event()
 
-    desired = {_PIN_RED: red, _PIN_YELLOW: yellow, _PIN_GREEN: green}
 
-    # Skip if nothing changed
-    if desired == _current_state:
-        return
+def _gpio_writer_loop():
+    """Dedicated thread: drains _pending_state to GPIO without blocking callers."""
+    while not _gpio_thread_stop.is_set():
+        fired = _pending_event.wait(timeout=0.5)
+        if not fired:
+            continue
+        _pending_event.clear()
 
-    # Phase 1: turn OFF first (active-low: OFF = HIGH → no ghost light)
-    off_state = {pin: False for pin, val in desired.items() if not val}
-    if off_state:
-        _set_all_fn(off_state)
+        with _lock:
+            desired = dict(_pending_state)
+            if desired == _current_state:
+                continue
+            # Single atomic write — no two-phase needed here because the
+            # dedicated thread is the only writer, so there is no race.
+            _set_all_fn(desired)
+            _current_state.update(desired)
 
-    # Phase 2: turn ON desired pins
-    on_state = {pin: True for pin, val in desired.items() if val}
-    if on_state:
-        _set_all_fn(on_state)
 
-    _current_state = desired
+if _GPIO_AVAILABLE and _set_all_fn is not None:
+    _gpio_thread = threading.Thread(
+        target=_gpio_writer_loop,
+        name='GPIOWriter',
+        daemon=True,
+    )
+    _gpio_thread.start()
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +155,7 @@ def _apply(red: bool, yellow: bool, green: bool) -> None:
 # ---------------------------------------------------------------------------
 
 def set_gpio_lights(red: bool, yellow: bool, green: bool) -> None:
-    """Set all three status LEDs explicitly.
+    """Queue new LED state. Returns immediately — GPIO write happens in background thread.
 
     Args:
         red:    Turn the red LED on (True) or off (False).
@@ -157,7 +166,10 @@ def set_gpio_lights(red: bool, yellow: bool, green: bool) -> None:
         return
 
     with _lock:
-        _apply(red, yellow, green)
+        _pending_state[_PIN_RED]    = red
+        _pending_state[_PIN_YELLOW] = yellow
+        _pending_state[_PIN_GREEN]  = green
+    _pending_event.set()   # wake GPIO thread — non-blocking
 
 
 def set_status(status: str) -> None:
@@ -190,9 +202,9 @@ def cleanup() -> None:
     """Turn off all LEDs and release GPIO lines. Call on application shutdown."""
     if not _GPIO_AVAILABLE or _release_fn is None:
         return
-
-    with _lock:
-        try:
-            _release_fn()
-        except Exception:
-            pass
+    _gpio_thread_stop.set()
+    _pending_event.set()   # unblock the writer thread so it exits
+    try:
+        _release_fn()
+    except Exception:
+        pass

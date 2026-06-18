@@ -235,7 +235,7 @@ class MAVLinkReader(threading.Thread):
                                 'rate_hz': pix_rate_hz,
                             })
 
-                    if self._msg_count % 25 == 0:
+                    if self._msg_count % 200 == 0:
                         print(f'az={az_ms2:+8.4f} m/s²  rate={state._actual_rate_hz:.1f} Hz', end='\r')
 
             except Exception as exc:

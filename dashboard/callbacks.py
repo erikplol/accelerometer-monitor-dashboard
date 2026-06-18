@@ -155,7 +155,6 @@ def register_callbacks(
                 mode='lines',
                 line=dict(color=az_color, width=1.5),
                 name='AZ',
-                hovertemplate='%{y:.3f} m/s²<extra></extra>',
             )],
             layout=go.Layout(
                 plot_bgcolor=CARD_BG,
@@ -204,7 +203,6 @@ def register_callbacks(
                 line=dict(color=az_color, width=1.5),
                 fillcolor='rgba(88,166,255,0.15)',
                 name='FFT',
-                hovertemplate='%{x:.2f} Hz  %{y:.3f} m/s²<extra></extra>',
             ))
 
         x_max = max(effective_rate / 2.0, 5.0)
