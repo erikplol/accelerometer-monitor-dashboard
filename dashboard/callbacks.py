@@ -22,8 +22,6 @@ from data_collect.data_collect import (
     LOG_DIR,
 )
 from data_collect.calibration import (
-    get_pixhawk_offset, get_pixhawk_base,
-    set_pixhawk_offset, save_pixhawk_offset, reset_pixhawk_offset,
     get_pixhawk_az_scale, get_pixhawk_az_scale_base,
     set_pixhawk_az_scale, save_pixhawk_az_scale, reset_pixhawk_az_scale,
     get_witmotion_scale, get_witmotion_base_scale,
@@ -417,59 +415,11 @@ def register_callbacks(
         icon = '▸' if is_visible else '▾'
         return {**current_style, 'display': new_display}, icon
 
-    # ── Pixhawk calibration ──────────────────────────────────────────────
-    @app.callback(
-        Output('pix-current-val', 'children'),
-        Output('pix-base-label', 'children'),
-        Output('calib-status', 'children'),
-        Input('pix-minus5',  'n_clicks'),
-        Input('pix-minus1',  'n_clicks'),
-        Input('pix-minus01', 'n_clicks'),
-        Input('pix-plus01',  'n_clicks'),
-        Input('pix-plus1',   'n_clicks'),
-        Input('pix-plus5',   'n_clicks'),
-        Input('pix-save',    'n_clicks'),
-        Input('pix-reset',   'n_clicks'),
-        Input('interval-component', 'n_intervals'),
-        prevent_initial_call=False,
-    )
-    def update_pix_calib(*_):
-        triggered = ctx.triggered_id
-
-        delta_map = {
-            'pix-minus5':  -5.0,
-            'pix-minus1':  -1.0,
-            'pix-minus01': -0.1,
-            'pix-plus01':  +0.1,
-            'pix-plus1':   +1.0,
-            'pix-plus5':   +5.0,
-        }
-
-        status = dash.no_update
-
-        if triggered in delta_map:
-            new_val = get_pixhawk_offset() + delta_map[triggered]
-            set_pixhawk_offset(new_val)
-            status = f'Pixhawk offset adjusted to {new_val:.3f} mG  (unsaved)'
-
-        elif triggered == 'pix-save':
-            path = save_pixhawk_offset(get_pixhawk_offset())
-            status = f'✔ Saved Pixhawk offset {get_pixhawk_offset():.3f} mG → {path}'
-
-        elif triggered == 'pix-reset':
-            val = reset_pixhawk_offset()
-            status = f'↺ Reset Pixhawk offset to base {val:.3f} mG'
-
-        current = get_pixhawk_offset()
-        base    = get_pixhawk_base()
-        base_label = f'Base (on-disk): {base:.3f} mG'
-        return f'{current:.3f}', base_label, status
-
     # ── Pixhawk AZ scale ───────────────────────────────────────────
     @app.callback(
         Output('pix-scale-current-val', 'children'),
         Output('pix-scale-base-label',  'children'),
-        Output('calib-status', 'children', allow_duplicate=True),
+        Output('calib-status', 'children'),
         Input('pix-scale-minus01',   'n_clicks'),
         Input('pix-scale-minus001',  'n_clicks'),
         Input('pix-scale-minus0001', 'n_clicks'),
@@ -479,7 +429,7 @@ def register_callbacks(
         Input('pix-scale-save',      'n_clicks'),
         Input('pix-scale-reset',     'n_clicks'),
         Input('interval-component',  'n_intervals'),
-        prevent_initial_call='initial_duplicate',
+        prevent_initial_call=False,
     )
     def update_pix_scale_calib(*_):
         triggered = ctx.triggered_id

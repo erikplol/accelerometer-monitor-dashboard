@@ -296,41 +296,6 @@ def create_layout(thresh_green: float, thresh_yellow: float, ui_interval_ms: int
             }),
 
             html.Div([
-                # ── Pixhawk block ────────────────────────────────────────
-                html.Div([
-                    html.Div('Pixhawk Gravity Offset', className='card-title',
-                             style={**LABEL, 'textAlign': 'center', 'marginBottom': 6}),
-                    html.Div(id='pix-base-label', style={
-                        'color': '#8b949e', 'fontSize': '0.75rem', 'textAlign': 'center', 'marginBottom': 4,
-                    }),
-                    html.Div([
-                        html.Div(id='pix-current-val', style={
-                            'color': '#58a6ff',
-                            'fontSize': '1.55rem',
-                            'fontWeight': 300,
-                            'fontVariantNumeric': 'tabular-nums',
-                            'minWidth': 110,
-                            'textAlign': 'center',
-                        }),
-                        html.Span('mG', style={'color': '#6e7681', 'fontSize': '0.8rem', 'alignSelf': 'flex-end', 'paddingBottom': 3}),
-                    ], style={'display': 'flex', 'alignItems': 'baseline', 'justifyContent': 'center', 'gap': 4, 'marginBottom': 8}),
-
-                    html.Div([
-                        html.Button('−5', id='pix-minus5', n_clicks=0, className='btn-calib'),
-                        html.Button('−1', id='pix-minus1', n_clicks=0, className='btn-calib'),
-                        html.Button('−0.1', id='pix-minus01', n_clicks=0, className='btn-calib'),
-                        html.Button('+0.1', id='pix-plus01', n_clicks=0, className='btn-calib btn-calib-pos'),
-                        html.Button('+1', id='pix-plus1', n_clicks=0, className='btn-calib btn-calib-pos'),
-                        html.Button('+5', id='pix-plus5', n_clicks=0, className='btn-calib btn-calib-pos'),
-                    ], style={'display': 'flex', 'gap': 4, 'justifyContent': 'center', 'flexWrap': 'wrap', 'marginBottom': 8}),
-
-                    html.Div([
-                        html.Button('💾 Save', id='pix-save', n_clicks=0, className='btn-calib-action btn-save'),
-                        html.Button('↺ Reset to Base', id='pix-reset', n_clicks=0, className='btn-calib-action btn-reset'),
-                    ], style={'display': 'flex', 'gap': 6, 'justifyContent': 'center'}),
-                ], style={**CARD, 'flex': '1 1 300px', 'display': 'flex', 'flexDirection': 'column',
-                          'justifyContent': 'center', 'alignItems': 'center', 'borderTop': '2px solid #4f8ef7'}),
-
                 # ── Pixhawk AZ scale block ──────────────────────────────
                 html.Div([
                     html.Div('Pixhawk AZ Scale', className='card-title',
