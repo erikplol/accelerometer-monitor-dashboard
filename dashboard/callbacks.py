@@ -21,6 +21,12 @@ from data_collect.data_collect import (
     stop_logging,
     LOG_DIR,
 )
+from data_collect.calibration import (
+    get_pixhawk_offset, get_pixhawk_base,
+    set_pixhawk_offset, save_pixhawk_offset, reset_pixhawk_offset,
+    get_witmotion_scale, get_witmotion_base_scale,
+    set_witmotion_scale, save_witmotion_scale, reset_witmotion_scale,
+)
 from dashboard.fft import compute_az_fft
 from dashboard.theme import CARD_BG, GRID_CLR, TICK_CLR, YAXIS_VEL, ZERO_CLR, light_style
 
@@ -394,3 +400,113 @@ def register_callbacks(
 
         stamp = time.strftime('%Y%m%d_%H%M%S')
         return dcc.send_bytes(write_zip, f'vibration_logs_{stamp}.zip')
+
+    # ── Calibration panel toggle ─────────────────────────────────────────
+    @app.callback(
+        Output('calib-panel-body', 'style'),
+        Output('calib-toggle-icon', 'children'),
+        Input('calib-toggle-bar', 'n_clicks'),
+        State('calib-panel-body', 'style'),
+        prevent_initial_call=True,
+    )
+    def toggle_calib_panel(n_clicks, current_style):
+        is_visible = current_style.get('display') != 'none'
+        new_display = 'none' if is_visible else 'flex'
+        icon = '▸' if is_visible else '▾'
+        return {**current_style, 'display': new_display}, icon
+
+    # ── Pixhawk calibration ──────────────────────────────────────────────
+    @app.callback(
+        Output('pix-current-val', 'children'),
+        Output('pix-base-label', 'children'),
+        Output('calib-status', 'children'),
+        Input('pix-minus5',  'n_clicks'),
+        Input('pix-minus1',  'n_clicks'),
+        Input('pix-minus01', 'n_clicks'),
+        Input('pix-plus01',  'n_clicks'),
+        Input('pix-plus1',   'n_clicks'),
+        Input('pix-plus5',   'n_clicks'),
+        Input('pix-save',    'n_clicks'),
+        Input('pix-reset',   'n_clicks'),
+        Input('interval-component', 'n_intervals'),
+        prevent_initial_call=False,
+    )
+    def update_pix_calib(*_):
+        triggered = ctx.triggered_id
+
+        delta_map = {
+            'pix-minus5':  -5.0,
+            'pix-minus1':  -1.0,
+            'pix-minus01': -0.1,
+            'pix-plus01':  +0.1,
+            'pix-plus1':   +1.0,
+            'pix-plus5':   +5.0,
+        }
+
+        status = dash.no_update
+
+        if triggered in delta_map:
+            new_val = get_pixhawk_offset() + delta_map[triggered]
+            set_pixhawk_offset(new_val)
+            status = f'Pixhawk offset adjusted to {new_val:.3f} mG  (unsaved)'
+
+        elif triggered == 'pix-save':
+            path = save_pixhawk_offset(get_pixhawk_offset())
+            status = f'✔ Saved Pixhawk offset {get_pixhawk_offset():.3f} mG → {path}'
+
+        elif triggered == 'pix-reset':
+            val = reset_pixhawk_offset()
+            status = f'↺ Reset Pixhawk offset to base {val:.3f} mG'
+
+        current = get_pixhawk_offset()
+        base    = get_pixhawk_base()
+        base_label = f'Base (on-disk): {base:.3f} mG'
+        return f'{current:.3f}', base_label, status
+
+    # ── Witmotion calibration ────────────────────────────────────────────
+    @app.callback(
+        Output('wtb-current-val', 'children'),
+        Output('wtb-base-label', 'children'),
+        Output('calib-status', 'children', allow_duplicate=True),
+        Input('wtb-minus01',   'n_clicks'),
+        Input('wtb-minus001',  'n_clicks'),
+        Input('wtb-minus0001', 'n_clicks'),
+        Input('wtb-plus0001',  'n_clicks'),
+        Input('wtb-plus001',   'n_clicks'),
+        Input('wtb-plus01',    'n_clicks'),
+        Input('wtb-save',      'n_clicks'),
+        Input('wtb-reset',     'n_clicks'),
+        Input('interval-component', 'n_intervals'),
+        prevent_initial_call=False,
+    )
+    def update_wtb_calib(*_):
+        triggered = ctx.triggered_id
+
+        delta_map = {
+            'wtb-minus01':   -0.1,
+            'wtb-minus001':  -0.01,
+            'wtb-minus0001': -0.001,
+            'wtb-plus0001':  +0.001,
+            'wtb-plus001':   +0.01,
+            'wtb-plus01':    +0.1,
+        }
+
+        status = dash.no_update
+
+        if triggered in delta_map:
+            new_val = round(get_witmotion_scale() + delta_map[triggered], 6)
+            set_witmotion_scale(new_val)
+            status = f'Witmotion scale adjusted to {new_val:.4f}×  (unsaved)'
+
+        elif triggered == 'wtb-save':
+            path = save_witmotion_scale(get_witmotion_scale())
+            status = f'✔ Saved Witmotion scale {get_witmotion_scale():.4f}× → {path}'
+
+        elif triggered == 'wtb-reset':
+            val = reset_witmotion_scale()
+            status = f'↺ Reset Witmotion scale to base {val:.4f}×'
+
+        current = get_witmotion_scale()
+        base    = get_witmotion_base_scale()
+        base_label = f'Base (on-disk): {base:.6f}×'
+        return f'{current:.4f}', base_label, status

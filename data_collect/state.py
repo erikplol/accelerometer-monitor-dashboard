@@ -214,12 +214,32 @@ def _load_witmotion_scale() -> float:
 
 
 WITMOTION_VZ_SCALE = _load_witmotion_scale()
+_witmotion_vz_scale_base = WITMOTION_VZ_SCALE   # on-disk base; never mutated by UI
 
 THRESH_GREEN = 2.8
 THRESH_YELLOW = 7.1
 
 # ArduPilot RAW_IMU sends mG (milli-G) for xacc/yacc/zacc
 MG_TO_MS2 = 9.80665 / 1000.0
+
+# Live Pixhawk gravity offset — updated by calibration UI without restart
+# _gravity_offset_base  : value loaded from file (never changed except on save)
+# _actual_gravity_offset: value used by the reader loop right now
+_gravity_offset_base: float = -980.0
+_actual_gravity_offset: float = -980.0
+
+def _init_gravity_offset():
+    """Read the calibration file once and initialise both tracking variables."""
+    global _gravity_offset_base, _actual_gravity_offset
+    try:
+        if os.path.exists(CALIB_FILE):
+            val = float(open(CALIB_FILE).read().strip())
+            _gravity_offset_base  = val
+            _actual_gravity_offset = val
+    except Exception:
+        pass
+
+_init_gravity_offset()
 
 # Shared data buffers
 _az_ms2_history = deque(maxlen=MAX_TIME_PTS)

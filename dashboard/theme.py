@@ -176,6 +176,47 @@ APP_INDEX_STRING = '''
 
   .download-actions { margin-top: 8px; }
 
+  /* ── Calibration buttons ────────────────────────────────── */
+  .btn-calib {
+    background: #161b22;
+    color: #f85149;
+    border: 1px solid #3a1f1f;
+    border-radius: 6px;
+    padding: 4px 9px;
+    font-size: 0.82rem;
+    font-family: inherit;
+    cursor: pointer;
+    font-variant-numeric: tabular-nums;
+    transition: filter 0.12s, transform 0.12s;
+    min-width: 44px;
+  }
+  .btn-calib-pos {
+    color: #3fb950;
+    border-color: #1f3a22;
+  }
+  .btn-calib:hover { filter: brightness(1.25); transform: translateY(-1px); }
+
+  .btn-calib-action {
+    border-radius: 7px;
+    padding: 5px 12px;
+    font-size: 0.82rem;
+    font-family: inherit;
+    cursor: pointer;
+    font-weight: 500;
+    transition: filter 0.12s, transform 0.12s;
+  }
+  .btn-save {
+    background: linear-gradient(135deg, #1f6feb, #388bfd);
+    color: #fff;
+    border: 1px solid #388bfd;
+  }
+  .btn-reset {
+    background: #161b22;
+    color: #9cb0cc;
+    border: 1px solid #30363d;
+  }
+  .btn-calib-action:hover { filter: brightness(1.15); transform: translateY(-1px); }
+
   .graphs-row {
     padding: 8px 14px 12px !important;
     gap: var(--space-2) !important;

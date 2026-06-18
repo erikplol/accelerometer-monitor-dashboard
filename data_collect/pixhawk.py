@@ -28,29 +28,23 @@ class MAVLinkReader(threading.Thread):
         self._pause_event = threading.Event()
         self._pause_event.set()
 
-        self._gravity_offset = -980.0
         self._calibrated = True
         self._calibration_samples = []
 
         fixed_offset = os.getenv('MAVLINK_FIXED_GRAVITY_OFFSET')
         if fixed_offset is not None:
             try:
-                self._gravity_offset = float(fixed_offset)
+                state._actual_gravity_offset = float(fixed_offset)
+                state._gravity_offset_base   = float(fixed_offset)
                 self._calibrated = True
             except Exception:
                 self._calibrated = False
                 self._calibration_samples = []
         else:
-            try:
-                if os.path.exists(state.CALIB_FILE):
-                    with open(state.CALIB_FILE, 'r') as fh:
-                        self._gravity_offset = float(fh.read().strip())
-                    self._calibrated = True
-                else:
-                    self._calibrated = False
-                    self._calibration_samples = []
-            except Exception as exc:
-                print(f'[MAVLink] Warning: could not load calibration: {exc}')
+            if os.path.exists(state.CALIB_FILE):
+                # Already loaded into state by _init_gravity_offset()
+                self._calibrated = True
+            else:
                 self._calibrated = False
                 self._calibration_samples = []
 
@@ -129,20 +123,20 @@ class MAVLinkReader(threading.Thread):
     def _calibrate_gravity(self, zacc_mg: float):
         if self._calibrated:
             return
-
         self._calibration_samples.append(zacc_mg)
         if len(self._calibration_samples) < 50:
             return
-
-        self._gravity_offset = float(np.median(self._calibration_samples))
+        offset = float(np.median(self._calibration_samples))
+        state._actual_gravity_offset = offset
+        state._gravity_offset_base   = offset
         self._calibrated = True
-        print(f'[MAVLink] Gravity calibrated: offset = {self._gravity_offset:.2f} mG')
+        print(f'[MAVLink] Gravity calibrated: offset = {offset:.2f} mG')
         try:
             calib_dir = os.path.dirname(state.CALIB_FILE)
             if calib_dir:
                 os.makedirs(calib_dir, exist_ok=True)
             with open(state.CALIB_FILE, 'w') as fh:
-                fh.write(f'{self._gravity_offset:.6f}\n')
+                fh.write(f'{offset:.6f}\n')
             print(f'[MAVLink] Saved gravity calibration -> {state.CALIB_FILE}')
         except Exception as exc:
             print(f'[MAVLink] Warning: could not save calibration: {exc}')
@@ -207,7 +201,7 @@ class MAVLinkReader(threading.Thread):
                         raw_zacc_mg = raw_zacc_ms2 / state.MG_TO_MS2
                         self._calibrate_gravity(raw_zacc_mg)
                         if self._calibrated:
-                            az_ms2 = raw_zacc_ms2 - (self._gravity_offset * state.MG_TO_MS2)
+                            az_ms2 = raw_zacc_ms2 - (state._actual_gravity_offset * state.MG_TO_MS2)
                         else:
                             az_ms2 = raw_zacc_ms2 - 9.80665
 
