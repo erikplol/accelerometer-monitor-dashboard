@@ -1,6 +1,7 @@
 """Dash callback registration for dashboard interactions and graph updates."""
 
 import os
+import threading
 import time
 import zipfile
 
@@ -12,6 +13,7 @@ import plotly.graph_objs as go
 from data_collect.data_collect import (
     get_actual_rate,
     get_histories,
+    get_histories_display,
     is_connected,
     is_witmotion_connected,
     save_log,
@@ -19,7 +21,7 @@ from data_collect.data_collect import (
     stop_logging,
     LOG_DIR,
 )
-from dashboard.fft import refresh_fft_cache
+from dashboard.fft import compute_az_fft
 from dashboard.theme import CARD_BG, GRID_CLR, TICK_CLR, YAXIS_VEL, ZERO_CLR, light_style
 
 
@@ -34,10 +36,24 @@ def register_callbacks(
     thresh_green,
     thresh_yellow,
 ):
-    # Refresh FFT every ~15 seconds.
+    # Refresh FFT every ~15 seconds in a background thread (non-blocking).
     fft_update_every_n_intervals = max(1, int(15_000 / ui_interval_ms))
     fft_cache = {'x': [], 'y': [], 'sig': None}
+    fft_lock = threading.Lock()
+    fft_busy = threading.Event()   # set while background FFT is running
     log_duration_s = 90
+
+    def _run_fft_background(az_snapshot, effective_rate):
+        """Compute FFT off the callback thread and update fft_cache."""
+        freqs, fft_vals, n_samples = compute_az_fft(
+            az_snapshot, effective_rate, fft_window_seconds
+        )
+        if freqs:
+            with fft_lock:
+                fft_cache['x'] = freqs
+                fft_cache['y'] = fft_vals
+                fft_cache['sig'] = (len(az_snapshot), az_snapshot[-1], n_samples)
+        fft_busy.clear()
 
     @app.callback(
         [Output('vz-time-graph', 'figure'),
@@ -58,26 +74,16 @@ def register_callbacks(
         if (playback_data or {}).get('paused', False):
             return tuple([dash.no_update] * 11)
 
-        # Get all data from collection threads
-        h = get_histories()
+        # Cheap display fetch — only the last max_display_pts points
+        h = get_histories_display(max_pts=max_display_pts)
         az_all = h.get('az_ms2', [])
         vz_all = h.get('vz_mms', [])
         hzz_all = h.get('hzz_hz', [])
         rel_all = h.get('rel_s', [])
 
-        # Keep AZ signal and x-axis lengths aligned to avoid stale-looking traces.
-        if rel_all and len(rel_all) != len(az_all):
-            n = min(len(rel_all), len(az_all))
-            rel_all = rel_all[-n:]
-            az_all = az_all[-n:]
-
-        if len(az_all) > max_display_pts:
-            step = max(1, len(az_all) // max_display_pts)
-            az_display = az_all[::step]
-            rel = rel_all[::step]
-        else:
-            az_display = az_all
-            rel = rel_all
+        # Data is already trimmed to max_display_pts — no further downsampling needed.
+        az_display = az_all
+        rel = rel_all
 
         az_color = '#58a6ff'
         empty_style = {'color': '#f85149', 'fontSize': '0.82rem', 'marginLeft': 18}
@@ -168,18 +174,31 @@ def register_callbacks(
 
         effective_rate = actual_rate if actual_rate > 0 else sampling_rate
         should_update_fft = (n % fft_update_every_n_intervals == 0)
-        refresh_fft_cache(
-            fft_cache,
-            az_all,
-            effective_rate,
-            fft_window_seconds,
-            should_update_fft,
-        )
+        if should_update_fft and not fft_busy.is_set():
+            # Take a snapshot of the full history for FFT (non-blocking grab)
+            try:
+                full_h = get_histories()
+                az_snapshot = full_h.get('az_ms2', [])
+            except Exception:
+                az_snapshot = []
+            if len(az_snapshot) >= 64:
+                fft_busy.set()
+                t = threading.Thread(
+                    target=_run_fft_background,
+                    args=(az_snapshot, effective_rate),
+                    daemon=True,
+                )
+                t.start()
 
-        if fft_cache['sig'] is not None and fft_cache['x']:
+        with fft_lock:
+            cached_x = list(fft_cache['x'])
+            cached_y = list(fft_cache['y'])
+            cached_sig = fft_cache['sig']
+
+        if cached_sig is not None and cached_x:
             fft_traces.append(go.Scattergl(
-                x=fft_cache['x'],
-                y=fft_cache['y'],
+                x=cached_x,
+                y=cached_y,
                 mode='lines',
                 fill='tozeroy',
                 line=dict(color=az_color, width=1.5),

@@ -47,6 +47,33 @@ def get_histories() -> dict:
     }
 
 
+def get_histories_display(max_pts: int = 200) -> dict:
+    """Lightweight variant of get_histories() for the UI update callback.
+
+    Only copies the last *max_pts* samples from each buffer under the lock,
+    which is much cheaper than copying the full 24 000-point deque on every
+    250 ms tick.  The full buffer is still kept in memory for FFT use.
+    """
+    with state._lock:
+        az_ms2 = list(state._az_ms2_history)[-max_pts:]
+        vz_mms = list(state._wit_vz_mms_history)[-max_pts:]
+        hzz_hz = list(state._wit_hzz_history)[-max_pts:]
+        ts     = list(state._ts_history)[-max_pts:]
+        wit_ts = list(state._wit_ts_history)[-max_pts:]
+    rel     = [stamp - ts[0]     for stamp in ts]     if ts     else []
+    wit_rel = [stamp - wit_ts[0] for stamp in wit_ts] if wit_ts else []
+    return {
+        'az_ms2':    az_ms2,
+        'vz_mms':    vz_mms,
+        'hzz_hz':    hzz_hz,
+        'wit_ts':    wit_ts,
+        'wit_rel_s': wit_rel,
+        'ts':        ts,
+        'rel_s':     rel,
+    }
+
+
+
 def get_latest_sample() -> dict:
     """Get the most recent combined sample."""
     with state._lock:

@@ -18,8 +18,10 @@ app.title = "Engine Vibration Monitor"
 
 SAMPLING_RATE = DC_SAMPLING_RATE
 # Windows needs longer intervals to prevent connection issues
-UI_INTERVAL_MS = 400 if os.name == 'nt' else 100
-MAX_DISPLAY_PTS = 100  # Reduce from 150 for faster rendering on Windows
+# Pi 5 needs a longer interval — 100 ms forces Dash to rebuild 2 Plotly figures
+# 10× per second which saturates a single CPU core. 250 ms is a good balance.
+UI_INTERVAL_MS = 400 if os.name == 'nt' else 250
+MAX_DISPLAY_PTS = 200  # points sent to browser per callback tick
 FFT_WINDOW_SECONDS = 15.0
 
 _reader = MAVLinkReader()
