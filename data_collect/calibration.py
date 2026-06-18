@@ -64,7 +64,6 @@ def set_pixhawk_az_scale(new_scale: float) -> None:
 def save_pixhawk_az_scale(new_scale: float) -> str:
     """Persist a new AZ scale to the calibration file and apply it."""
     set_pixhawk_az_scale(new_scale)
-    state._pixhawk_az_scale_base = state._pixhawk_az_scale
     calib_dir = os.path.dirname(state.PIXHAWK_SCALE_CALIB_FILE)
     if calib_dir:
         os.makedirs(calib_dir, exist_ok=True)
@@ -102,7 +101,6 @@ def set_witmotion_scale(new_scale: float) -> None:
 def save_witmotion_scale(new_scale: float) -> str:
     """Persist a new VZ scale to the calibration file and apply it."""
     set_witmotion_scale(new_scale)
-    state._witmotion_vz_scale_base = float(new_scale)
     calib_dir = os.path.dirname(state.WITMOTION_CALIB_FILE)
     if calib_dir:
         os.makedirs(calib_dir, exist_ok=True)

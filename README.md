@@ -28,6 +28,9 @@ accelerometer-monitor-dashboard/
 ├── README.md
 ├── calibration/
 │   ├── pixhawk_calib.txt
+│   ├── pixhawk_scale_base.txt
+│   ├── pixhawk_scale_calib.txt
+│   ├── wtb_base.txt
 │   └── wtb_calib.txt
 ├── dashboard/
 │   ├── layout.py
@@ -62,6 +65,9 @@ accelerometer-monitor-dashboard/
 - `data_collect/vb01_python_sdk/device_model.py`: Vendor SDK helper for low-level Modbus operations.
 - `data_collect/vb01_python_sdk/test.py`: Standalone SDK usage example script.
 - `calibration/pixhawk_calib.txt`: Plain-text Pixhawk gravity offset in mG (single float value).
+- `calibration/pixhawk_scale_base.txt`: Fixed baseline calibration file for Pixhawk AZ scale (defaults to 1.0).
+- `calibration/pixhawk_scale_calib.txt`: Plain-text Pixhawk AZ scale multiplier (single float value).
+- `calibration/wtb_base.txt`: Fixed baseline calibration file for Witmotion scale (defaults to 0.08).
 - `calibration/wtb_calib.txt`: Plain-text Witmotion VZ scale multiplier (single float value).
 - `logs/`: Saved CSV logs.
 
@@ -328,4 +334,7 @@ Key variables:
 - `WTVB_SENSOR_RATE_HZ`
 - `WTVB_SERIAL_TIMEOUT`
 - `WTVB_CALIB_FILE` (default `calibration/wtb_calib.txt`; plain-text multiplier for decoded Witmotion VZ values)
+- `WTVB_BASE_CALIB_FILE` (default `calibration/wtb_base.txt`; fixed baseline value for resetting Witmotion VZ scale)
 - `MAVLINK_CALIB_FILE` (default `calibration/pixhawk_calib.txt`; plain-text gravity offset in mG)
+- `MAVLINK_SCALE_CALIB_FILE` (default `calibration/pixhawk_scale_calib.txt`; plain-text AZ scale multiplier for Pixhawk)
+- `MAVLINK_SCALE_BASE_CALIB_FILE` (default `calibration/pixhawk_scale_base.txt`; fixed baseline value for resetting Pixhawk AZ scale)

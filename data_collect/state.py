@@ -189,6 +189,7 @@ WITMOTION_SENSOR_RATE_HZ = int(float(os.getenv('WTVB_SENSOR_RATE_HZ', '100')))
 # Windows serial ports need higher timeout (0.3-0.5s) due to driver latency
 WITMOTION_SERIAL_TIMEOUT = float(os.getenv('WTVB_SERIAL_TIMEOUT', '0.5' if os.name == 'nt' else '0.15'))
 WITMOTION_CALIB_FILE = os.getenv('WTVB_CALIB_FILE', 'calibration/wtb_calib.txt')
+WITMOTION_BASE_CALIB_FILE = os.getenv('WTVB_BASE_CALIB_FILE', 'calibration/wtb_base.txt')
 
 # Witmotion register map
 REG_AZ = 0x36
@@ -201,21 +202,43 @@ MAX_TIME_PTS = int(max(600, 60 * SAMPLING_RATE))
 
 CALIB_FILE = os.getenv('MAVLINK_CALIB_FILE', 'calibration/pixhawk_calib.txt')
 PIXHAWK_SCALE_CALIB_FILE = os.getenv('MAVLINK_SCALE_CALIB_FILE', 'calibration/pixhawk_scale_calib.txt')
+PIXHAWK_SCALE_BASE_CALIB_FILE = os.getenv('MAVLINK_SCALE_BASE_CALIB_FILE', 'calibration/pixhawk_scale_base.txt')
 
 
-def _load_witmotion_scale() -> float:
-    """Load Witmotion VZ scale from a plain text file (single float value)."""
+_witmotion_vz_scale_base: float = 0.08
+WITMOTION_VZ_SCALE: float = 0.08
+
+def _init_witmotion_scale():
+    global _witmotion_vz_scale_base, WITMOTION_VZ_SCALE
+    # 1. Load or create the base scale file (fixed to 0.08)
+    try:
+        if not os.path.exists(WITMOTION_BASE_CALIB_FILE):
+            calib_dir = os.path.dirname(WITMOTION_BASE_CALIB_FILE)
+            if calib_dir:
+                os.makedirs(calib_dir, exist_ok=True)
+            with open(WITMOTION_BASE_CALIB_FILE, 'w') as fh:
+                fh.write('0.080000\n')
+            _witmotion_vz_scale_base = 0.08
+        else:
+            with open(WITMOTION_BASE_CALIB_FILE, 'r') as fh:
+                _witmotion_vz_scale_base = float(fh.read().strip())
+    except Exception as exc:
+        print(f'[Witmotion] Warning: could not load base calibration: {exc}')
+        _witmotion_vz_scale_base = 0.08
+
+    # 2. Load or fallback to base for current scale file
     try:
         if os.path.exists(WITMOTION_CALIB_FILE):
-            with open(WITMOTION_CALIB_FILE, 'r') as handle:
-                return float(handle.read().strip())
+            with open(WITMOTION_CALIB_FILE, 'r') as fh:
+                WITMOTION_VZ_SCALE = float(fh.read().strip())
+        else:
+            WITMOTION_VZ_SCALE = _witmotion_vz_scale_base
     except Exception as exc:
-        print(f'[Witmotion] Warning: could not load calibration from {WITMOTION_CALIB_FILE}: {exc}')
-    return 1.0
+        print(f'[Witmotion] Warning: could not load current calibration: {exc}')
+        WITMOTION_VZ_SCALE = _witmotion_vz_scale_base
 
+_init_witmotion_scale()
 
-WITMOTION_VZ_SCALE = _load_witmotion_scale()
-_witmotion_vz_scale_base = WITMOTION_VZ_SCALE   # on-disk base; never mutated by UI
 
 THRESH_GREEN = 2.8
 THRESH_YELLOW = 7.1
@@ -251,13 +274,32 @@ _pixhawk_az_scale:      float = 1.0
 def _init_pixhawk_az_scale():
     """Read the AZ scale calibration file once and initialise tracking variables."""
     global _pixhawk_az_scale_base, _pixhawk_az_scale
+    # 1. Load or create the base scale file (fixed to 1.0)
+    try:
+        if not os.path.exists(PIXHAWK_SCALE_BASE_CALIB_FILE):
+            calib_dir = os.path.dirname(PIXHAWK_SCALE_BASE_CALIB_FILE)
+            if calib_dir:
+                os.makedirs(calib_dir, exist_ok=True)
+            with open(PIXHAWK_SCALE_BASE_CALIB_FILE, 'w') as fh:
+                fh.write('1.000000\n')
+            _pixhawk_az_scale_base = 1.0
+        else:
+            with open(PIXHAWK_SCALE_BASE_CALIB_FILE, 'r') as fh:
+                _pixhawk_az_scale_base = float(fh.read().strip())
+    except Exception as exc:
+        print(f'[Pixhawk] Warning: could not load base AZ scale: {exc}')
+        _pixhawk_az_scale_base = 1.0
+
+    # 2. Load or fallback to base for current scale file
     try:
         if os.path.exists(PIXHAWK_SCALE_CALIB_FILE):
-            val = max(0.0, float(open(PIXHAWK_SCALE_CALIB_FILE).read().strip()))
-            _pixhawk_az_scale_base = val
-            _pixhawk_az_scale      = val
-    except Exception:
-        pass
+            with open(PIXHAWK_SCALE_CALIB_FILE, 'r') as fh:
+                _pixhawk_az_scale = max(0.0, float(fh.read().strip()))
+        else:
+            _pixhawk_az_scale = _pixhawk_az_scale_base
+    except Exception as exc:
+        print(f'[Pixhawk] Warning: could not load current AZ scale: {exc}')
+        _pixhawk_az_scale = _pixhawk_az_scale_base
 
 _init_pixhawk_az_scale()
 
