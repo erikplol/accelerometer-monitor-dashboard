@@ -477,7 +477,7 @@ def register_callbacks(
         Input('wtb-save',      'n_clicks'),
         Input('wtb-reset',     'n_clicks'),
         Input('interval-component', 'n_intervals'),
-        prevent_initial_call=False,
+        prevent_initial_call='initial_duplicate',
     )
     def update_wtb_calib(*_):
         triggered = ctx.triggered_id
