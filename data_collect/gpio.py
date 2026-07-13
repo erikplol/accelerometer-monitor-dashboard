@@ -36,7 +36,7 @@ _PIN_GREEN  = 22
 # Minimum time (seconds) a new state must be requested consistently before the
 # physical output actually switches.  Prevents rapid on/off toggling near
 # thresholds that can make relays/lamps unreliable.
-DEBOUNCE_SECONDS = float(os.getenv("GPIO_DEBOUNCE_S", "0.5"))
+DEBOUNCE_SECONDS = float(os.getenv("GPIO_DEBOUNCE_S", "1.0"))
 
 # ---------------------------------------------------------------------------
 # Internal state
@@ -48,11 +48,6 @@ _current_state  = {_PIN_RED: False, _PIN_YELLOW: False, _PIN_GREEN: False}
 
 # Most recent state requested by the caller.
 _pending_state  = {_PIN_RED: False, _PIN_YELLOW: False, _PIN_GREEN: False}
-
-# Debounce tracking: the candidate next-state and the monotonic timestamp when
-# it was first seen.  If a *different* state arrives the timer resets.
-_candidate_state = {_PIN_RED: False, _PIN_YELLOW: False, _PIN_GREEN: False}
-_candidate_since = 0.0  # time.monotonic() of first request matching _candidate_state
 
 _pending_event  = threading.Event()   # signals GPIO thread that new state is waiting
 _GPIO_AVAILABLE = False
@@ -74,7 +69,7 @@ try:
 
         _settings = gpiod.LineSettings(
             direction=Direction.OUTPUT,
-            output_value=_Value.INACTIVE,  # default OFF = pin LOW
+            output_value=_Value.ACTIVE,   # active-low: default OFF = pin HIGH
         )
         _request = gpiod.request_lines(
             _GPIOCHIP,
@@ -87,19 +82,19 @@ try:
         )
 
         def _set_all_fn(states: dict):
-            # LED ON  = pin HIGH (ACTIVE)
-            # LED OFF = pin LOW  (INACTIVE)
+            # active-low: LED ON  = pin LOW  (INACTIVE)
+            #             LED OFF = pin HIGH (ACTIVE)
             _request.set_values({
-                pin: (_Value.ACTIVE if val else _Value.INACTIVE)
+                pin: (_Value.INACTIVE if val else _Value.ACTIVE)
                 for pin, val in states.items()
             })
 
         def _release_fn():
-            # Turn OFF = set LOW (INACTIVE)
+            # active-low: turn OFF = set HIGH (ACTIVE)
             _request.set_values({
-                _PIN_RED:    _Value.INACTIVE,
-                _PIN_YELLOW: _Value.INACTIVE,
-                _PIN_GREEN:  _Value.INACTIVE,
+                _PIN_RED:    _Value.ACTIVE,
+                _PIN_YELLOW: _Value.ACTIVE,
+                _PIN_GREEN:  _Value.ACTIVE,
             })
             _request.release()
 
@@ -119,14 +114,14 @@ try:
             )
 
         def _set_all_fn(states: dict):
-            # LED ON = 1 (HIGH), LED OFF = 0 (LOW)
+            # active-low: LED ON = 0 (LOW), LED OFF = 1 (HIGH)
             for pin, val in states.items():
-                _pin_map[pin].set_value(1 if val else 0)
+                _pin_map[pin].set_value(0 if val else 1)
 
         def _release_fn():
-            # Turn OFF = set LOW (0)
+            # active-low: turn OFF = set HIGH (1)
             for _line in _pin_map.values():
-                _line.set_value(0)
+                _line.set_value(1)
                 _line.release()
             _chip.close()
 
@@ -145,16 +140,22 @@ _gpio_thread = None
 def _gpio_writer_loop():
     """Dedicated thread: drains _pending_state to GPIO without blocking callers.
 
-    Applies debounce logic: a new state is only written to the physical pins
-    once it has been continuously requested for at least DEBOUNCE_SECONDS.
-    This prevents relay/LED flicker when sensor readings oscillate near a
-    threshold boundary.
+    Debounce strategy — "minimum hold time":
+      • The very first requested state is written to GPIO immediately.
+      • After a write, the output is *held* for at least DEBOUNCE_SECONDS.
+      • During the hold period, incoming state changes are noted but not applied.
+      • Once the hold period expires and the latest requested state differs
+        from what is on the pins, the new state is written and a new hold
+        period begins.
+
+    This prevents rapid toggling near thresholds while ensuring the lamp
+    always lights up promptly when sensor data starts flowing.
     """
-    global _candidate_since
+    last_write_time = 0.0   # monotonic time of last GPIO write
 
     while not _gpio_thread_stop.is_set():
-        # Short timeout so that debounce timers can fire even when no new
-        # request arrives.
+        # Short timeout so hold-period expiry is checked frequently even
+        # when no new requests arrive.
         _pending_event.wait(timeout=0.1)
 
         # Snapshot desired state and clear event *inside* the lock so a
@@ -169,29 +170,22 @@ def _gpio_writer_loop():
 
         now = time.monotonic()
 
-        with _lock:
-            if desired != _candidate_state:
-                # Different state than what we've been timing — reset.
-                _candidate_state.update(desired)
-                _candidate_since = now
-                continue   # restart the debounce clock
+        # Enforce minimum hold time: don't switch until DEBOUNCE_SECONDS
+        # have passed since the last write.
+        if (now - last_write_time) < DEBOUNCE_SECONDS:
+            continue
 
-            elapsed = now - _candidate_since
-            if elapsed < DEBOUNCE_SECONDS:
-                continue   # debounce timer not yet satisfied
-
-            # Timer satisfied — take a copy to write outside the lock.
-            commit = dict(desired)
-
+        # Hold period expired (or first write) — commit the change.
         # Perform the (potentially slow) GPIO I/O outside the lock so
         # callers of set_gpio_lights() are never blocked on hardware.
         try:
-            _set_all_fn(commit)
+            _set_all_fn(desired)
         except Exception:
             continue
 
+        last_write_time = now
         with _lock:
-            _current_state.update(commit)
+            _current_state.update(desired)
 
 
 if _GPIO_AVAILABLE and _set_all_fn is not None:
@@ -259,9 +253,6 @@ def all_off() -> None:
         _pending_state[_PIN_RED]    = False
         _pending_state[_PIN_YELLOW] = False
         _pending_state[_PIN_GREEN]  = False
-        _candidate_state[_PIN_RED]   = False
-        _candidate_state[_PIN_YELLOW] = False
-        _candidate_state[_PIN_GREEN]  = False
 
     # Immediate write — bypass debounce for explicit "all off".
     try:
