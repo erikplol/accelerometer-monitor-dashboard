@@ -36,7 +36,7 @@ _PIN_GREEN  = 22
 # Minimum time (seconds) a new state must be requested consistently before the
 # physical output actually switches.  Prevents rapid on/off toggling near
 # thresholds that can make relays/lamps unreliable.
-DEBOUNCE_SECONDS = float(os.getenv("GPIO_DEBOUNCE_S", "1.0"))
+DEBOUNCE_SECONDS = float(os.getenv("GPIO_DEBOUNCE_S", "0.2"))
 
 # ---------------------------------------------------------------------------
 # Internal state
@@ -126,9 +126,11 @@ try:
             _chip.close()
 
     _GPIO_AVAILABLE = True
+    print(f'[GPIO] Initialized OK (gpiod, chip={_GPIOCHIP}, debounce={DEBOUNCE_SECONDS}s)')
 
-except Exception:
+except Exception as _init_exc:
     _GPIO_AVAILABLE = False
+    print(f'[GPIO] Unavailable: {_init_exc}')
 
 # ---------------------------------------------------------------------------
 # Background GPIO writer thread
@@ -140,52 +142,35 @@ _gpio_thread = None
 def _gpio_writer_loop():
     """Dedicated thread: drains _pending_state to GPIO without blocking callers.
 
-    Debounce strategy — "minimum hold time":
-      • The very first requested state is written to GPIO immediately.
-      • After a write, the output is *held* for at least DEBOUNCE_SECONDS.
-      • During the hold period, incoming state changes are noted but not applied.
-      • Once the hold period expires and the latest requested state differs
-        from what is on the pins, the new state is written and a new hold
-        period begins.
-
-    This prevents rapid toggling near thresholds while ensuring the lamp
-    always lights up promptly when sensor data starts flowing.
+    Debounce: after each write, the output is held for at least
+    DEBOUNCE_SECONDS before the next change is allowed.  The very first
+    write happens immediately.
     """
     last_write_time = 0.0   # monotonic time of last GPIO write
 
     while not _gpio_thread_stop.is_set():
-        # Short timeout so hold-period expiry is checked frequently even
-        # when no new requests arrive.
-        _pending_event.wait(timeout=0.1)
+        _pending_event.wait(timeout=0.5)
+        _pending_event.clear()
 
-        # Snapshot desired state and clear event *inside* the lock so a
-        # set() that arrives between clear() and lock-acquire is never lost.
         with _lock:
-            _pending_event.clear()
             desired = dict(_pending_state)
+            if desired == _current_state:
+                continue
 
-        # Already showing this state — nothing to do.
-        if desired == _current_state:
-            continue
+            now = time.monotonic()
+            if (now - last_write_time) < DEBOUNCE_SECONDS:
+                # Hold period not expired — skip but do NOT clear the request.
+                # Re-signal so we check again on next wakeup.
+                _pending_event.set()
+                continue
 
-        now = time.monotonic()
-
-        # Enforce minimum hold time: don't switch until DEBOUNCE_SECONDS
-        # have passed since the last write.
-        if (now - last_write_time) < DEBOUNCE_SECONDS:
-            continue
-
-        # Hold period expired (or first write) — commit the change.
-        # Perform the (potentially slow) GPIO I/O outside the lock so
-        # callers of set_gpio_lights() are never blocked on hardware.
-        try:
-            _set_all_fn(desired)
-        except Exception:
-            continue
-
-        last_write_time = now
-        with _lock:
-            _current_state.update(desired)
+            try:
+                _set_all_fn(desired)
+                _current_state.update(desired)
+                last_write_time = now
+                print(f'[GPIO] Set: R={desired[_PIN_RED]} Y={desired[_PIN_YELLOW]} G={desired[_PIN_GREEN]}')
+            except Exception as exc:
+                print(f'[GPIO] Write error: {exc}')
 
 
 if _GPIO_AVAILABLE and _set_all_fn is not None:
