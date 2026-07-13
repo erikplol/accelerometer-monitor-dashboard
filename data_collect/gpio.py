@@ -74,7 +74,7 @@ try:
 
         _settings = gpiod.LineSettings(
             direction=Direction.OUTPUT,
-            output_value=_Value.ACTIVE,   # active-low: default OFF = pin HIGH
+            output_value=_Value.INACTIVE,  # default OFF = pin LOW
         )
         _request = gpiod.request_lines(
             _GPIOCHIP,
@@ -87,19 +87,19 @@ try:
         )
 
         def _set_all_fn(states: dict):
-            # active-low: LED ON  = pin LOW  (INACTIVE)
-            #             LED OFF = pin HIGH (ACTIVE)
+            # LED ON  = pin HIGH (ACTIVE)
+            # LED OFF = pin LOW  (INACTIVE)
             _request.set_values({
-                pin: (_Value.INACTIVE if val else _Value.ACTIVE)
+                pin: (_Value.ACTIVE if val else _Value.INACTIVE)
                 for pin, val in states.items()
             })
 
         def _release_fn():
-            # active-low: turn OFF = set HIGH (ACTIVE)
+            # Turn OFF = set LOW (INACTIVE)
             _request.set_values({
-                _PIN_RED:    _Value.ACTIVE,
-                _PIN_YELLOW: _Value.ACTIVE,
-                _PIN_GREEN:  _Value.ACTIVE,
+                _PIN_RED:    _Value.INACTIVE,
+                _PIN_YELLOW: _Value.INACTIVE,
+                _PIN_GREEN:  _Value.INACTIVE,
             })
             _request.release()
 
@@ -119,14 +119,14 @@ try:
             )
 
         def _set_all_fn(states: dict):
-            # active-low: LED ON = 0 (LOW), LED OFF = 1 (HIGH)
+            # LED ON = 1 (HIGH), LED OFF = 0 (LOW)
             for pin, val in states.items():
-                _pin_map[pin].set_value(0 if val else 1)
+                _pin_map[pin].set_value(1 if val else 0)
 
         def _release_fn():
-            # active-low: turn OFF = set HIGH (1)
+            # Turn OFF = set LOW (0)
             for _line in _pin_map.values():
-                _line.set_value(1)
+                _line.set_value(0)
                 _line.release()
             _chip.close()
 
